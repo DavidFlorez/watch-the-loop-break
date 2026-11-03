@@ -161,8 +161,10 @@ def generate_batch(
         truncation=False,
     )
     input_ids = enc["input_ids"].to(device)
-    attention_mask = enc["attention_mask"].to(device)
-    batch_size = input_ids.shape[0]
+    init_mask = enc["attention_mask"].to(device)
+    batch_size, prompt_len = input_ids.shape
+    full_mask = torch.ones((batch_size, prompt_len + int(max_new_tokens) + 1), dtype=init_mask.dtype, device=device)
+    full_mask[:, :prompt_len] = init_mask
 
     torch.manual_seed(seed)
     if device == "cuda":
@@ -189,7 +191,7 @@ def generate_batch(
 
     out = model(
         input_ids=input_ids,
-        attention_mask=attention_mask,
+        attention_mask=full_mask[:, :prompt_len],
         use_cache=True,
         logits_to_keep=1,
     )
@@ -204,7 +206,7 @@ def generate_batch(
         if step > 0:
             out = model(
                 input_ids=next_tok,
-                attention_mask=attention_mask,
+                attention_mask=full_mask[:, : prompt_len + step],
                 past_key_values=past,
                 use_cache=True,
                 logits_to_keep=1,
@@ -262,25 +264,24 @@ def generate_batch(
             keep_idx = torch.tensor(keep_rows, dtype=torch.long, device=device)
             past.reorder_cache(keep_idx)
             next_tok = next_tok.index_select(0, keep_idx)
-            attention_mask = attention_mask.index_select(0, keep_idx)
+            full_mask = full_mask.index_select(0, keep_idx)
             if seen_penalty is not None:
                 seen_penalty = seen_penalty.index_select(0, keep_idx)
             if hasattr(model, "model") and getattr(model.model, "rope_deltas", None) is not None:
                 model.model.rope_deltas = model.model.rope_deltas.index_select(0, keep_idx)
             active_slots = [active_slots[r] for r in keep_rows]
 
-        attention_mask = torch.cat(
-            [
-                attention_mask,
-                torch.ones((len(active_slots), 1), dtype=attention_mask.dtype, device=device),
-            ],
-            dim=-1,
-        )
+        if device == "mps" and (step + 1) % 64 == 0 and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
 
+    del past, out, seen_penalty, full_mask
     if device == "cuda":
         torch.cuda.synchronize()
-    elif device == "mps" and hasattr(torch.mps, "synchronize"):
-        torch.mps.synchronize()
+    elif device == "mps":
+        if hasattr(torch.mps, "synchronize"):
+            torch.mps.synchronize()
+        if hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
     batch_elapsed = time.perf_counter() - t0
 
     results: List[Dict[str, Any]] = []
@@ -469,7 +470,7 @@ def save_sweep_charts(
 def run_sweep(
     n_problems: int = 50,
     alphas: Sequence[float] = DEFAULT_ALPHAS,
-    batch_size: int = 10,
+    batch_size: int = 8,
     max_new_tokens: int = 4096,
     temperature: float = 0.6,
     top_p: float = 0.95,
@@ -610,7 +611,7 @@ def run_sweep(
         )
 
         # Save intermediate CSVs and charts after each alpha completes
-        summary_df = pd.DataFrame(summary_rows)
+        summary_df = pd.DataFrame(summary_rows).sort_values("alpha").reset_index(drop=True)
         summary_df.to_csv(summary_csv, index=False)
         per_problem_df = pd.DataFrame(
             [{k: v for k, v in r.items() if k != "text"} for r in all_records]
@@ -618,7 +619,8 @@ def run_sweep(
         per_problem_df.to_csv(per_problem_csv, index=False)
         save_sweep_charts(summary_df, per_problem_df, out_dir=out_dir)
 
-    summary_df = pd.DataFrame(summary_rows)
+    summary_df = pd.DataFrame(summary_rows).sort_values("alpha").reset_index(drop=True)
+    summary_df.to_csv(summary_csv, index=False)
     per_problem_df = pd.DataFrame(
         [{k: v for k, v in r.items() if k != "text"} for r in all_records]
     )
@@ -638,7 +640,7 @@ def main() -> None:
         default="0,0.5,1.0,1.25,1.5",
         help="Comma-separated list of alpha values (default: 0,0.5,1.0,1.25,1.5)",
     )
-    parser.add_argument("--batch-size", type=int, default=10, help="Batch size for generation (default: 10)")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for generation (default: 8)")
     parser.add_argument("--max-new-tokens", type=int, default=4096, help="Max new tokens (default: 4096)")
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top-p", type=float, default=0.95)
