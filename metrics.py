@@ -60,15 +60,29 @@ class PresencePenaltyLogitsProcessor(LogitsProcessor):
             raise ValueError(f"presence_penalty must be >= 0, got {presence_penalty}")
         self.presence_penalty = float(presence_penalty)
         self.prompt_length = int(prompt_length)
+        self._penalty_buf: Optional[torch.Tensor] = None
+        self._last_seq_len: int = int(prompt_length)
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        if self.presence_penalty == 0.0 or input_ids.shape[1] <= self.prompt_length:
+        cur_len = input_ids.shape[1]
+        if self.presence_penalty == 0.0 or cur_len <= self.prompt_length:
             return scores
 
-        gen_tokens = input_ids[:, self.prompt_length :]
-        penalty = torch.zeros_like(scores)
-        penalty.scatter_(1, gen_tokens, self.presence_penalty)
-        return scores - penalty
+        if (
+            self._penalty_buf is None
+            or self._penalty_buf.shape != scores.shape
+            or self._penalty_buf.device != scores.device
+            or cur_len <= self._last_seq_len
+        ):
+            self._penalty_buf = torch.zeros_like(scores)
+            gen_tokens = input_ids[:, self.prompt_length :]
+            self._penalty_buf.scatter_(1, gen_tokens, self.presence_penalty)
+        else:
+            new_tokens = input_ids[:, self._last_seq_len :]
+            self._penalty_buf.scatter_(1, new_tokens, self.presence_penalty)
+
+        self._last_seq_len = cur_len
+        return scores - self._penalty_buf
 
 
 # ---------------------------------------------------------------------------

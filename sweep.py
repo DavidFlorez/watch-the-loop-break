@@ -45,6 +45,7 @@ from weights import (
     EDIT_MODEL_ID,
     blend,
     detect_hardware,
+    install_fast_qwen35_kernels,
     load_target_tensors,
     register_active_model,
 )
@@ -58,6 +59,7 @@ def load_model_and_tokenizer(
     dtype: Optional[torch.dtype] = None,
 ) -> Tuple[Any, Any, str, torch.dtype, str]:
     """Load `Qwen/Qwen3.5-0.8B` and its tokenizer on auto-detected hardware."""
+    install_fast_qwen35_kernels()
     dev, dt, hw_desc = detect_hardware(device)
     if dtype is not None:
         dt = dtype
@@ -141,7 +143,7 @@ def generate_batch(
     enable_thinking: bool = True,
     seed: int = 0,
 ) -> List[Dict[str, Any]]:
-    """Run batched generation with thinking enabled and presence_penalty=1.5."""
+    """Run batched generation with thinking enabled, presence_penalty=1.5, and dynamic EOS batch compaction."""
     prompts = [
         tokenizer.apply_chat_template(
             [{"role": "user", "content": build_math_prompt(p["problem"])}],
@@ -160,64 +162,133 @@ def generate_batch(
     )
     input_ids = enc["input_ids"].to(device)
     attention_mask = enc["attention_mask"].to(device)
-    prompt_len = input_ids.shape[1]
+    batch_size = input_ids.shape[0]
 
     torch.manual_seed(seed)
     if device == "cuda":
         torch.cuda.manual_seed_all(seed)
-
-    gen_kwargs: Dict[str, Any] = {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "max_new_tokens": int(max_new_tokens),
-        "do_sample": temperature > 0.0,
-        "temperature": float(temperature),
-        "top_p": float(top_p),
-        "top_k": int(top_k),
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
-
-    if presence_penalty > 0.0:
-        if supports_native_presence_penalty():
-            gen_kwargs["presence_penalty"] = float(presence_penalty)
-        else:
-            gen_kwargs["logits_processor"] = LogitsProcessorList(
-                [PresencePenaltyLogitsProcessor(presence_penalty=presence_penalty, prompt_length=prompt_len)]
-            )
-
-    t0 = time.perf_counter()
-    output_ids = model.generate(**gen_kwargs)
-    if device == "cuda":
-        torch.cuda.synchronize()
-    elif device == "mps" and hasattr(torch.mps, "synchronize"):
-        torch.mps.synchronize()
-    batch_elapsed = time.perf_counter() - t0
 
     eos_ids = set()
     if isinstance(tokenizer.eos_token_id, int):
         eos_ids.add(tokenizer.eos_token_id)
     elif isinstance(tokenizer.eos_token_id, (list, tuple)):
         eos_ids.update(tokenizer.eos_token_id)
-    pad_id = tokenizer.pad_token_id
+    for tok_str in ("<|im_end|>", "<|endoftext|>"):
+        tid = tokenizer.convert_tokens_to_ids(tok_str)
+        if isinstance(tid, int) and tid >= 0:
+            eos_ids.add(tid)
+
+    active_slots: List[int] = list(range(batch_size))
+    generated_lists: List[List[int]] = [[] for _ in range(batch_size)]
+    hit_eos_flags: List[bool] = [False] * batch_size
+    finish_times: List[float] = [0.0] * batch_size
+
+    t0 = time.perf_counter()
+    if hasattr(model, "model") and hasattr(model.model, "rope_deltas"):
+        model.model.rope_deltas = None
+
+    out = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=True,
+        logits_to_keep=1,
+    )
+    past = out.past_key_values
+    logits = out.logits[:, -1, :].float()
+    seen_penalty = (
+        torch.zeros_like(logits) if presence_penalty > 0.0 else None
+    )
+    next_tok: Optional[torch.Tensor] = None
+
+    for step in range(int(max_new_tokens)):
+        if step > 0:
+            out = model(
+                input_ids=next_tok,
+                attention_mask=attention_mask,
+                past_key_values=past,
+                use_cache=True,
+                logits_to_keep=1,
+            )
+            logits = out.logits[:, -1, :].float()
+            if seen_penalty is not None:
+                logits.sub_(seen_penalty)
+
+        if temperature > 0.0:
+            if top_k > 0:
+                cand_logits, cand_indices = torch.topk(
+                    logits, k=min(int(top_k), logits.shape[-1]), dim=-1
+                )
+            else:
+                cand_logits, cand_indices = torch.sort(logits, descending=True, dim=-1)
+            cand_logits = cand_logits / float(temperature)
+            probs = torch.softmax(cand_logits, dim=-1)
+            if 0.0 < top_p < 1.0:
+                cum_probs = torch.cumsum(probs, dim=-1)
+                remove_mask = (cum_probs - probs) > float(top_p)
+                probs.masked_fill_(remove_mask, 0.0)
+            sampled_rel = torch.multinomial(probs, num_samples=1)
+            next_tok = cand_indices.gather(-1, sampled_rel)
+        else:
+            next_tok = logits.argmax(dim=-1, keepdim=True)
+
+        if seen_penalty is not None:
+            seen_penalty.scatter_(1, next_tok, float(presence_penalty))
+
+        tok_list = next_tok.squeeze(-1).tolist()
+        if isinstance(tok_list, int):
+            tok_list = [tok_list]
+
+        keep_rows: List[int] = []
+        now_elapsed = time.perf_counter() - t0
+        for row_idx, tid in enumerate(tok_list):
+            orig_idx = active_slots[row_idx]
+            generated_lists[orig_idx].append(int(tid))
+            if int(tid) in eos_ids:
+                hit_eos_flags[orig_idx] = True
+                finish_times[orig_idx] = now_elapsed
+            else:
+                keep_rows.append(row_idx)
+
+        if not keep_rows:
+            break
+
+        if (step + 1) % 512 == 0:
+            print(
+                f"  [step {step + 1}/{max_new_tokens}] active={len(keep_rows)}/{batch_size} | elapsed={now_elapsed:.1f}s",
+                flush=True,
+            )
+
+        if len(keep_rows) < len(active_slots):
+            keep_idx = torch.tensor(keep_rows, dtype=torch.long, device=device)
+            past.reorder_cache(keep_idx)
+            next_tok = next_tok.index_select(0, keep_idx)
+            attention_mask = attention_mask.index_select(0, keep_idx)
+            if seen_penalty is not None:
+                seen_penalty = seen_penalty.index_select(0, keep_idx)
+            if hasattr(model, "model") and getattr(model.model, "rope_deltas", None) is not None:
+                model.model.rope_deltas = model.model.rope_deltas.index_select(0, keep_idx)
+            active_slots = [active_slots[r] for r in keep_rows]
+
+        attention_mask = torch.cat(
+            [
+                attention_mask,
+                torch.ones((len(active_slots), 1), dtype=attention_mask.dtype, device=device),
+            ],
+            dim=-1,
+        )
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+    elif device == "mps" and hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
+    batch_elapsed = time.perf_counter() - t0
 
     results: List[Dict[str, Any]] = []
     per_item_time = batch_elapsed / max(len(problems), 1)
 
     for b, prob in enumerate(problems):
-        gen_seq = output_ids[b, prompt_len:].tolist()
-        # Trim trailing pad tokens after EOS when batch size > 1
-        actual_tokens: List[int] = []
-        hit_eos = False
-        for tid in gen_seq:
-            actual_tokens.append(tid)
-            if tid in eos_ids:
-                hit_eos = True
-                break
-        if not hit_eos and pad_id is not None and len(problems) > 1:
-            while actual_tokens and actual_tokens[-1] == pad_id:
-                actual_tokens.pop()
-
+        actual_tokens = generated_lists[b]
+        hit_eos = hit_eos_flags[b]
         n_tokens = len(actual_tokens)
         hit_cap = (n_tokens >= max_new_tokens) and not hit_eos
         text = tokenizer.decode(actual_tokens, skip_special_tokens=False)
@@ -398,7 +469,7 @@ def save_sweep_charts(
 def run_sweep(
     n_problems: int = 50,
     alphas: Sequence[float] = DEFAULT_ALPHAS,
-    batch_size: int = 10,
+    batch_size: int = 50,
     max_new_tokens: int = 4096,
     temperature: float = 0.6,
     top_p: float = 0.95,
@@ -439,12 +510,13 @@ def run_sweep(
     register_active_model(model, base_tensors, edit_tensors)
 
     native_pp = supports_native_presence_penalty()
-    print(f"[Sweep] Hardware: {hw_desc}")
+    print(f"[Sweep] Hardware: {hw_desc}", flush=True)
     print(
         f"[Sweep] N={len(problems)} MATH-500 problems | alphas={list(alphas)} | "
         f"temp={temperature}, top_p={top_p}, top_k={top_k}, "
-        f"presence_penalty={presence_penalty} ({'native' if native_pp else 'PresencePenaltyLogitsProcessor'}), "
-        f"thinking={enable_thinking}, max_new_tokens={max_new_tokens}, batch_size={batch_size}"
+        f"presence_penalty={presence_penalty} ({'native' if native_pp else 'dynamic-batch'}), "
+        f"thinking={enable_thinking}, max_new_tokens={max_new_tokens}, batch_size={batch_size}",
+        flush=True,
     )
 
     all_records: List[Dict[str, Any]] = []
@@ -534,24 +606,27 @@ def run_sweep(
         print(
             f"[Summary α={alpha_f:g}] Accuracy={row_summary['accuracy_pct']:.1f}% ({n_correct}/{n_total}) | "
             f"Hit Cap={row_summary['hit_cap_pct']:.1f}% | Mean Tokens={row_summary['mean_tokens']:.1f} | "
-            f"8-gram Rep={row_summary['mean_rep_8gram_pct']:.1f}% | Wall={row_summary['wall_time_s']:.1f}s"
+            f"8-gram Rep={row_summary['mean_rep_8gram_pct']:.1f}% | Wall={row_summary['wall_time_s']:.1f}s",
+            flush=True,
         )
 
+        # Save intermediate CSVs and charts after each alpha completes
+        summary_df = pd.DataFrame(summary_rows)
+        summary_df.to_csv(summary_csv, index=False)
+        per_problem_df = pd.DataFrame(
+            [{k: v for k, v in r.items() if k != "text"} for r in all_records]
+        )
+        per_problem_df.to_csv(per_problem_csv, index=False)
+        save_sweep_charts(summary_df, per_problem_df, out_dir=out_dir)
+
     summary_df = pd.DataFrame(summary_rows)
-    summary_df.to_csv(summary_csv, index=False)
-
     per_problem_df = pd.DataFrame(
-        [
-            {k: v for k, v in r.items() if k != "text"}
-            for r in all_records
-        ]
+        [{k: v for k, v in r.items() if k != "text"} for r in all_records]
     )
-    per_problem_df.to_csv(per_problem_csv, index=False)
-
     c1, c2 = save_sweep_charts(summary_df, per_problem_df, out_dir=out_dir)
-    print(f"[Saved] Summary CSV -> {summary_csv}")
-    print(f"[Saved] Per-problem CSV -> {per_problem_csv}")
-    print(f"[Saved] Charts -> {c1}, {c2}")
+    print(f"[Saved] Summary CSV -> {summary_csv}", flush=True)
+    print(f"[Saved] Per-problem CSV -> {per_problem_csv}", flush=True)
+    print(f"[Saved] Charts -> {c1}, {c2}", flush=True)
     return summary_df, per_problem_df
 
 
@@ -564,7 +639,7 @@ def main() -> None:
         default="0,0.5,1.0,1.25,1.5",
         help="Comma-separated list of alpha values (default: 0,0.5,1.0,1.25,1.5)",
     )
-    parser.add_argument("--batch-size", type=int, default=10, help="Batch size for generation (default: 10)")
+    parser.add_argument("--batch-size", type=int, default=50, help="Batch size for generation (default: 50)")
     parser.add_argument("--max-new-tokens", type=int, default=4096, help="Max new tokens (default: 4096)")
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top-p", type=float, default=0.95)

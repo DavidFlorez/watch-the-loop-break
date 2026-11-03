@@ -287,6 +287,88 @@ def _resolve_parameter_by_name(model: torch.nn.Module, name: str) -> torch.nn.Pa
     raise KeyError(f"Could not find tensor '{name}' (or '{alt_name}') in model parameters.")
 
 
+_FAST_KERNELS_INSTALLED = False
+
+
+def install_fast_qwen35_kernels() -> bool:
+    """Install fast single-token decode kernels for Qwen3.5 GatedDeltaNet when FLA/causal_conv1d are absent.
+
+    Replaces:
+    1. `causal_conv1d_update`: avoids grouped `F.conv1d(..., groups=6144)` for `seq_len=1` in favor of
+       in-place state shift + fused elementwise dot product over the 4-tap kernel.
+    2. `torch_recurrent_gated_delta_rule`: avoids 4D broadcast elementwise products `[B, H, 128, 128]`
+       for `seq_len=1` in favor of batched matrix-vector products `torch.matmul`.
+    """
+    global _FAST_KERNELS_INSTALLED
+    if _FAST_KERNELS_INSTALLED:
+        return True
+    try:
+        import transformers.models.qwen3_5.modeling_qwen3_5 as mq
+    except Exception:
+        return False
+
+    orig_conv = mq.causal_conv1d_update
+    orig_rec = mq.torch_recurrent_gated_delta_rule
+
+    def fast_causal_conv1d_update(hidden_states, conv_state, weight, bias=None, activation=None):
+        _, hidden_size, seq_len = hidden_states.shape
+        if seq_len == 1:
+            conv_state.copy_(torch.cat([conv_state[:, :, 1:], hidden_states], dim=-1))
+            w = weight.to(hidden_states.dtype)
+            out = (conv_state.to(hidden_states.dtype) * w.unsqueeze(0)).sum(dim=-1, keepdim=True)
+            if bias is not None:
+                out = out + bias.to(hidden_states.dtype).view(1, -1, 1)
+            if activation is not None:
+                out = mq.ACT2FN[activation](out)
+            return out
+        return orig_conv(hidden_states, conv_state, weight, bias, activation)
+
+    def fast_recurrent_gated_delta_rule(
+        query,
+        key,
+        value,
+        g,
+        beta,
+        initial_state=None,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=False,
+        **kwargs,
+    ):
+        if key.shape[1] == 1 and initial_state is not None:
+            initial_dtype = query.dtype
+            q_t = query.squeeze(1).float()
+            k_t = key.squeeze(1).float()
+            v_t = value.squeeze(1).float()
+            if use_qk_l2norm_in_kernel:
+                q_t = q_t * torch.rsqrt((q_t * q_t).sum(dim=-1, keepdim=True) + 1e-6)
+                k_t = k_t * torch.rsqrt((k_t * k_t).sum(dim=-1, keepdim=True) + 1e-6)
+            q_t = q_t * (q_t.shape[-1] ** -0.5)
+            decay_t = g.squeeze(1).float().exp().unsqueeze(-1).unsqueeze(-1)
+            beta_t = beta.squeeze(1).float().unsqueeze(-1)
+            state = initial_state.float() * decay_t
+            kv_mem = torch.matmul(k_t.unsqueeze(-2), state).squeeze(-2)
+            delta = (v_t - kv_mem) * beta_t
+            state = state + torch.matmul(k_t.unsqueeze(-1), delta.unsqueeze(-2))
+            out = torch.matmul(q_t.unsqueeze(-2), state).squeeze(-2).unsqueeze(1).to(initial_dtype)
+            return out, (state if output_final_state else None)
+        return orig_rec(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            **kwargs,
+        )
+
+    mq.causal_conv1d_update = fast_causal_conv1d_update
+    mq.torch_recurrent_gated_delta_rule = fast_recurrent_gated_delta_rule
+    _FAST_KERNELS_INSTALLED = True
+    return True
+
+
 @torch.no_grad()
 def blend(
     alpha: float,
