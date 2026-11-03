@@ -203,31 +203,31 @@ def render_repetition_meter_html(
     safe_gold = html.escape(str(gold_answer)) if gold_answer else "—"
 
     return f"""
-<div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;background:#ffffff;box-shadow:0 1px 2px rgba(0,0,0,0.04);font-family:system-ui,-apple-system,sans-serif;">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-    <span style="font-weight:700;font-size:14px;color:#0f172a;">Weight Blend α = {alpha:.2f}</span>
-    <span style="padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:700;background:{badge_bg};color:{badge_fg};">
+<div style="border:1px solid #cbd5e1;border-radius:10px;padding:12px 14px;background:#ffffff !important;color:#0f172a !important;box-shadow:0 1px 3px rgba(0,0,0,0.08);font-family:system-ui,-apple-system,sans-serif;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px;">
+    <span style="font-weight:700;font-size:14px;color:#0f172a !important;">Weight Blend α = {alpha:.2f}</span>
+    <span style="padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:700;background:{badge_bg};color:{badge_fg} !important;">
       {html.escape(loop_label)}
     </span>
   </div>
 
   <div style="margin:6px 0;">
-    <div style="display:flex;justify-content:space-between;font-size:12px;color:#334155;margin-bottom:3px;">
-      <span><b>Repeated 8-Gram Ratio:</b> {rep_pct:.1f}%</span>
-      <span><b>Tail (240w) 8-Gram Rep:</b> {tail_pct:.1f}%</span>
+    <div style="display:flex;justify-content:space-between;font-size:12px;color:#1e293b !important;margin-bottom:3px;">
+      <span style="color:#1e293b !important;"><strong style="color:#0f172a !important;">Repeated 8-Gram Ratio:</strong> {rep_pct:.1f}%</span>
+      <span style="color:#1e293b !important;"><strong style="color:#0f172a !important;">Tail (240w) 8-Gram Rep:</strong> {tail_pct:.1f}%</span>
     </div>
-    <div style="width:100%;height:11px;background:#f1f5f9;border-radius:999px;overflow:hidden;border:1px solid #cbd5e1;">
+    <div style="width:100%;height:11px;background:#e2e8f0;border-radius:999px;overflow:hidden;border:1px solid #cbd5e1;">
       <div style="width:{rep_pct:.1f}%;height:100%;background:{bar_color};transition:width 0.15s ease;"></div>
     </div>
   </div>
 
   <div style="margin:6px 0;">
-    <div style="display:flex;justify-content:space-between;font-size:12px;color:#475569;margin-bottom:3px;">
-      <span><b>Tokens:</b> {int(n_tokens)} / {int(max_tokens)} ({tok_pct:.0f}%)</span>
-      <span><b>Boxed:</b> <code>{safe_pred}</code> (Gold: <code>{safe_gold}</code>)</span>
+    <div style="display:flex;justify-content:space-between;font-size:12px;color:#334155 !important;margin-bottom:3px;">
+      <span style="color:#334155 !important;"><strong style="color:#0f172a !important;">Tokens:</strong> {int(n_tokens)} / {int(max_tokens)} ({tok_pct:.0f}%)</span>
+      <span style="color:#334155 !important;"><strong style="color:#0f172a !important;">Boxed:</strong> <code style="color:#0f172a !important;background:#f1f5f9 !important;padding:1px 4px;border-radius:4px;">{safe_pred}</code> (Gold: <code style="color:#0f172a !important;background:#f1f5f9 !important;padding:1px 4px;border-radius:4px;">{safe_gold}</code>)</span>
     </div>
-    <div style="width:100%;height:6px;background:#f1f5f9;border-radius:999px;overflow:hidden;">
-      <div style="width:{tok_pct:.1f}%;height:100%;background:#3b82f6;transition:width 0.15s ease;"></div>
+    <div style="width:100%;height:6px;background:#e2e8f0;border-radius:999px;overflow:hidden;">
+      <div style="width:{tok_pct:.1f}%;height:100%;background:#2563eb;transition:width 0.15s ease;"></div>
     </div>
   </div>
 
@@ -384,6 +384,7 @@ def stream_side_by_side(
             out_l = model(input_ids=inp_l, past_key_values=past_l, use_cache=True, logits_to_keep=1)
             past_l = out_l.past_key_values
             nt_l = _sample_next_token(out_l.logits[:, -1, :], gen_l, temp, tp, tk, pp)
+            del out_l
             gen_l.append(nt_l)
             if nt_l in eos_ids:
                 done_l = True
@@ -394,11 +395,12 @@ def stream_side_by_side(
             out_r = model(input_ids=inp_r, past_key_values=past_r, use_cache=True, logits_to_keep=1)
             past_r = out_r.past_key_values
             nt_r = _sample_next_token(out_r.logits[:, -1, :], gen_r, temp, tp, tk, pp)
+            del out_r
             gen_r.append(nt_r)
             if nt_r in eos_ids:
                 done_r = True
 
-        if device == "mps" and (step + 1) % 64 == 0 and hasattr(torch.mps, "empty_cache"):
+        if device == "mps" and (step + 1) % 16 == 0 and hasattr(torch.mps, "empty_cache"):
             torch.mps.empty_cache()
 
         if (step + 1) % emit_every == 0 or (done_l and done_r) or (step + 1 == max_toks):
@@ -487,39 +489,46 @@ def replay_recorded_comparison(
 
     words_l = rec_l["text"].split(" ")
     words_r = rec_r["text"].split(" ")
-    max_len = max(len(words_l), len(words_r), 1)
-    n_frames = 18
+    max_words = max(len(words_l), len(words_r), 1)
+    max_toks_seen = max(int(rec_l["n_tokens"]), int(rec_r["n_tokens"]), 1)
+    n_frames = 24
 
     for frame in range(1, n_frames + 1):
         frac = frame / n_frames
-        cur_l = " ".join(words_l[: max(1, int(len(words_l) * frac))])
-        cur_r = " ".join(words_r[: max(1, int(len(words_r) * frac))])
-        tok_l = int(rec_l["n_tokens"] * frac)
-        tok_r = int(rec_r["n_tokens"] * frac)
-        is_last = frame == n_frames
+        cur_word_budget = max(1, int(max_words * frac))
+        cur_tok_budget = max(1, int(max_toks_seen * frac))
 
-        rep_l = rec_l["rep_8gram_ratio"] if is_last else repeated_8gram_ratio(cur_l)
-        tail_l = rec_l["tail_rep_8gram_ratio"] if is_last else tail_repeated_8gram_ratio(cur_l)
-        rep_r = rec_r["rep_8gram_ratio"] if is_last else repeated_8gram_ratio(cur_r)
-        tail_r = rec_r["tail_rep_8gram_ratio"] if is_last else tail_repeated_8gram_ratio(cur_r)
+        done_l_now = (frame == n_frames) or (cur_word_budget >= len(words_l) and cur_tok_budget >= int(rec_l["n_tokens"]))
+        done_r_now = (frame == n_frames) or (cur_word_budget >= len(words_r) and cur_tok_budget >= int(rec_r["n_tokens"]))
 
-        status = "done" if is_last else "streaming"
-        hit_l = bool(rec_l["hit_cap"]) if is_last else False
-        hit_r = bool(rec_r["hit_cap"]) if is_last else False
-        pred_l = rec_l["pred"] if is_last else extract_last_boxed(cur_l)
-        pred_r = rec_r["pred"] if is_last else extract_last_boxed(cur_r)
-        ok_l = bool(rec_l["correct"]) if is_last else None
-        ok_r = bool(rec_r["correct"]) if is_last else None
+        cur_l = rec_l["text"] if done_l_now else " ".join(words_l[:cur_word_budget])
+        cur_r = rec_r["text"] if done_r_now else " ".join(words_r[:cur_word_budget])
+        tok_l = int(rec_l["n_tokens"]) if done_l_now else min(int(rec_l["n_tokens"]), cur_tok_budget)
+        tok_r = int(rec_r["n_tokens"]) if done_r_now else min(int(rec_r["n_tokens"]), cur_tok_budget)
+
+        rep_l = rec_l["rep_8gram_ratio"] if done_l_now else repeated_8gram_ratio(cur_l)
+        tail_l = rec_l["tail_rep_8gram_ratio"] if done_l_now else tail_repeated_8gram_ratio(cur_l)
+        rep_r = rec_r["rep_8gram_ratio"] if done_r_now else repeated_8gram_ratio(cur_r)
+        tail_r = rec_r["tail_rep_8gram_ratio"] if done_r_now else tail_repeated_8gram_ratio(cur_r)
+
+        status_l = "done" if done_l_now else "streaming"
+        status_r = "done" if done_r_now else "streaming"
+        hit_l = bool(rec_l["hit_cap"]) if done_l_now else False
+        hit_r = bool(rec_r["hit_cap"]) if done_r_now else False
+        pred_l = rec_l["pred"] if done_l_now else extract_last_boxed(cur_l)
+        pred_r = rec_r["pred"] if done_r_now else extract_last_boxed(cur_r)
+        ok_l = bool(rec_l["correct"]) if done_l_now else None
+        ok_r = bool(rec_r["correct"]) if done_r_now else None
 
         h_l = render_repetition_meter_html(
-            al_key, rep_l, tail_l, tok_l, rec_l.get("max_new_tokens", 4096), 85.0, status, hit_l, pred_l, gold, ok_l
+            al_key, rep_l, tail_l, tok_l, rec_l.get("max_new_tokens", 4096), 85.0, status_l, hit_l, pred_l, gold, ok_l
         )
         h_r = render_repetition_meter_html(
-            ar_key, rep_r, tail_r, tok_r, rec_r.get("max_new_tokens", 4096), 85.0, status, hit_r, pred_r, gold, ok_r
+            ar_key, rep_r, tail_r, tok_r, rec_r.get("max_new_tokens", 4096), 85.0, status_r, hit_r, pred_r, gold, ok_r
         )
         yield prob_text, gold, h_l, cur_l, h_r, cur_r
-        if not is_last:
-            time.sleep(0.06)
+        if frame < n_frames:
+            time.sleep(0.08)
 
 
 def on_problem_select(problem_label: str) -> Tuple[str, str]:
@@ -533,12 +542,26 @@ def build_demo(default_max_tokens: int = 4096) -> gr.Blocks:
     _, _, hw_desc = detect_hardware()
     problems = get_math500_problems()
     recorded = load_recorded_sweep_pairs()
-    # Default to a problem present in recorded sweep if available
+    # Default to a recorded contrast problem where alpha=0 hit cap and alpha=1 solved cleanly
     default_prob = problems[0]
-    for p in problems:
-        if p["unique_id"] in recorded:
-            default_prob = p
+    preferred_ids = ("test/algebra/1936.json", "test/algebra/1332.json")
+    by_uid = {p["unique_id"]: p for p in problems}
+    for uid in preferred_ids:
+        runs = recorded.get(uid, {})
+        if uid in by_uid and 0.0 in runs and 1.0 in runs and runs[1.0].get("correct") and not runs[0.0].get("correct"):
+            default_prob = by_uid[uid]
             break
+    else:
+        for p in problems:
+            runs = recorded.get(p["unique_id"], {})
+            if 0.0 in runs and 1.0 in runs and runs[1.0].get("correct") and not runs[0.0].get("correct"):
+                default_prob = p
+                break
+        else:
+            for p in problems:
+                if p["unique_id"] in recorded:
+                    default_prob = p
+                    break
 
     max_tok_init = int(max(128, min(4096, default_max_tokens)))
     init_left_html = render_repetition_meter_html(
@@ -552,8 +575,8 @@ def build_demo(default_max_tokens: int = 4096) -> gr.Blocks:
         gr.Markdown(
             f"""# 🧠 Watch the Loop Break: Weight-Space Programming Explorer
 Reproducing & extending **[Sparks of Weight-Space Programming](https://rikiyat.github.io/blog/weight-space-programming/)** on `Qwen/Qwen3.5-0.8B` vs. `RikiyaT/Qwen3.5-0.8B-weight-space-programming`.
-Only **2 tensors** (`layers.15.mlp.down_proj.weight` and `layers.19.mlp.down_proj.weight` — 64 columns each, 0.0150% of parameters) differ between Base ($\alpha=0$) and Edited ($\alpha=1$).
-Use `blend(alpha)` to set $W(\alpha) = W_{{\text{{base}}}} + \alpha(W_{{\text{{edit}}}} - W_{{\text{{base}}}})$ and watch the repetition loop break in real time.
+Only **2 tensors** (`layers.15.mlp.down_proj.weight` and `layers.19.mlp.down_proj.weight` — 64 columns each, `0.0150%` of parameters) differ between Base (`α = 0`) and Edited (`α = 1`).
+Use `blend(alpha)` to set `W(α) = W_base + α · (W_edit − W_base)` and watch the repetition loop break in real time.
 **Hardware detected:** `{hw_desc}`"""
         )
 

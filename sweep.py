@@ -380,15 +380,18 @@ def save_sweep_charts(
 
     # Panel C: Repeated 8-Gram Ratio vs α
     ax = axes[1, 0]
-    ax.plot(alphas, rep8, marker="D", linewidth=2.5, markersize=7.5, color="#9333ea", label="Mean Repeated 8-gram Ratio (%)")
-    for x, y_r in zip(alphas, rep8):
+    tail_rep8 = summary_df["mean_tail_rep_8gram_pct"].to_numpy()
+    ax.plot(alphas, rep8, marker="D", linewidth=2.5, markersize=7.5, color="#9333ea", label="Full-Trace Repeated 8-Gram Ratio (%)")
+    ax.plot(alphas, tail_rep8, marker="^", linewidth=2.0, markersize=7.0, linestyle="--", color="#ec4899", label="Final-512-Token Tail Loop Ratio (%)")
+    for x, y_r, y_t in zip(alphas, rep8, tail_rep8):
         ax.annotate(f"{y_r:.1f}%", (x, y_r), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=8.5, color="#7e22ce", fontweight="bold")
+        ax.annotate(f"{y_t:.1f}%", (x, y_t), textcoords="offset points", xytext=(0, -13 if y_t < y_r else 8), ha="center", fontsize=8.0, color="#db2777")
     ax.axvline(1.0, color="#64748b", linestyle=":", alpha=0.7)
     ax.set_title("C. Loop Severity: Repeated 8-Gram Ratio vs. α", fontsize=11.5, fontweight="bold")
     ax.set_xlabel("Interpolation Coefficient α")
     ax.set_ylabel("Repeated 8-Gram Ratio (%)")
     ax.set_xticks(alphas)
-    ax.set_ylim(0, max(100.0, float(rep8.max()) + 12.0))
+    ax.set_ylim(-1.0, max(20.0, float(max(rep8.max(), tail_rep8.max())) * 1.25))
     ax.grid(True, linestyle="--", alpha=0.35)
     ax.legend(loc="upper right", fontsize=8.8)
 

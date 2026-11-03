@@ -18,6 +18,23 @@ This repository:
 
 ---
 
+## Key Results ($N=50$ MATH-500 Sweep, `max_new_tokens=4096`)
+
+Evaluated across `seed=0` (`temperature=0.6`, `top_p=0.95`, `top_k=20`, `presence_penalty=1.5`, `enable_thinking=True`) on Apple M3 (`bfloat16`):
+
+| Blend $\alpha$ | Ablation Scale ($6\alpha$) | Correct ($N=50$) | Accuracy (%) | Hit 4096 Cap (%) | Mean Tokens | Full-Trace 8-Gram Rep (%) | Final-512w Tail Rep (%) | Wall Time (s) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **0.00** (Base) | $0.0\times$ | 2 / 50 | 4.0% | 98.0% (49/50) | 4055.9 | 8.44% | **14.71%** | 3157.01s |
+| **0.50** | $3.0\times$ | 3 / 50 | 6.0% | 94.0% (47/50) | 3990.4 | 3.74% | 1.22% | 1918.79s |
+| **1.00** (Published) | $6.0\times$ | 3 / 50 | 6.0% | 94.0% (47/50) | 4028.7 | 2.99% | 1.39% | 2609.49s |
+| **1.25** (**Optimal @ 4k**) | $7.5\times$ | **6 / 50** | **12.0%** | **88.0% (44/50)** | **3982.9** | 2.69% | 1.35% | 1995.77s |
+| **1.50** (Over-ablation) | $9.0\times$ | 4 / 50 | 8.0% | 92.0% (46/50) | 4019.4 | **2.37%** | **0.74%** | **1890.71s** |
+
+- **Exact 2-Tensor Diff**: Across all `488` tensors (`873,438,784` parameters), **`486` are bit-identical** in `bfloat16`; only `layers.15.mlp.down_proj.weight` ($\sigma_1/\sigma_2 = 1771.2$, `99.99945%` rank-1 energy) and `layers.19.mlp.down_proj.weight` ($\sigma_1/\sigma_2 = 1552.0$, `99.99914%` rank-1 energy) differ across 64 columns each (`0.0150%` of parameters).
+- **Inverted-U Dose Response under a 4k Budget**: Verbatim loops collapse **12×** by $\alpha = 0.5$–$1.0$ (tail 512w repetition `14.71% -> 1.22%–1.39%`), while extrapolating to **$\alpha = 1.25$** trims over-cautious `<think>` verification chains enough to double accuracy (`12.0%` vs `6.0%`) before over-projection at $\alpha = 1.5$ degrades reasoning (`8.0%`). Every edited ($\alpha > 0$) run that finished before the 4,096-token cap solved the problem (`100%` precision conditioned on completion: `3/3`, `3/3`, `6/6`, `4/4`).
+
+---
+
 ## Visuals
 
 ### 1. Side-by-Side Gradio App (`app.py`)
