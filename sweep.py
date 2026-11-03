@@ -469,7 +469,7 @@ def save_sweep_charts(
 def run_sweep(
     n_problems: int = 50,
     alphas: Sequence[float] = DEFAULT_ALPHAS,
-    batch_size: int = 50,
+    batch_size: int = 10,
     max_new_tokens: int = 4096,
     temperature: float = 0.6,
     top_p: float = 0.95,
@@ -527,15 +527,13 @@ def run_sweep(
         blend(alpha_f, model=model, base_tensors=base_tensors, edit_tensors=edit_tensors)
 
         pending = [p for p in problems if (alpha_f, p["unique_id"]) not in cached_records]
+        # Length-bucket by prompt length to minimize left-padding overhead during chunked prefill
+        pending.sort(key=lambda p: len(p["problem"]))
         alpha_t0 = time.perf_counter()
 
         if pending:
-            pbar = tqdm(
-                range(0, len(pending), batch_size),
-                desc=f"alpha={alpha_f:g}",
-                unit="batch",
-            )
-            for start in pbar:
+            starts = list(range(0, len(pending), batch_size))
+            for b_idx, start in enumerate(starts, start=1):
                 batch_probs = pending[start : start + batch_size]
                 batch_out = generate_batch(
                     model=model,
@@ -567,10 +565,11 @@ def run_sweep(
                 ]
                 cur_acc = np.mean([r["correct"] for r in done_for_alpha]) * 100.0
                 cur_cap = np.mean([r["hit_cap"] for r in done_for_alpha]) * 100.0
-                pbar.set_postfix(
-                    done=f"{len(done_for_alpha)}/{len(problems)}",
-                    acc=f"{cur_acc:.1f}%",
-                    cap=f"{cur_cap:.1f}%",
+                mean_t = np.mean([r["n_tokens"] for r in batch_out])
+                print(
+                    f"[alpha={alpha_f:g}] Batch {b_idx}/{len(starts)} ({len(done_for_alpha)}/{len(problems)}) | "
+                    f"batch_mean_toks={mean_t:.0f} | running_acc={cur_acc:.1f}% | running_cap={cur_cap:.1f}%",
+                    flush=True,
                 )
 
         alpha_records = [cached_records[(alpha_f, p["unique_id"])] for p in problems]
@@ -639,7 +638,7 @@ def main() -> None:
         default="0,0.5,1.0,1.25,1.5",
         help="Comma-separated list of alpha values (default: 0,0.5,1.0,1.25,1.5)",
     )
-    parser.add_argument("--batch-size", type=int, default=50, help="Batch size for generation (default: 50)")
+    parser.add_argument("--batch-size", type=int, default=10, help="Batch size for generation (default: 10)")
     parser.add_argument("--max-new-tokens", type=int, default=4096, help="Max new tokens (default: 4096)")
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top-p", type=float, default=0.95)
