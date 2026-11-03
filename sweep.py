@@ -480,7 +480,7 @@ def save_sweep_charts(
 def run_sweep(
     n_problems: int = 50,
     alphas: Sequence[float] = DEFAULT_ALPHAS,
-    batch_size: int = 6,
+    batch_size: int = 10,
     max_new_tokens: int = 4096,
     temperature: float = 0.6,
     top_p: float = 0.95,
@@ -530,8 +530,52 @@ def run_sweep(
         flush=True,
     )
 
-    all_records: List[Dict[str, Any]] = []
-    summary_rows: List[Dict[str, Any]] = []
+    def _build_cumulative_outputs() -> Tuple[pd.DataFrame, pd.DataFrame]:
+        candidate_alphas = sorted(
+            {float(x) for x in alphas} | ({k[0] for k in cached_records} if resume else set())
+        )
+        cum_records: List[Dict[str, Any]] = []
+        cum_summary_rows: List[Dict[str, Any]] = []
+
+        for a_val in candidate_alphas:
+            if not all((a_val, p["unique_id"]) in cached_records for p in problems):
+                continue
+            a_recs = [cached_records[(a_val, p["unique_id"])] for p in problems]
+            cum_records.extend(a_recs)
+
+            n_tot = len(a_recs)
+            n_corr = sum(1 for r in a_recs if r["correct"])
+            n_cap_cnt = sum(1 for r in a_recs if r["hit_cap"])
+            m_toks = float(np.mean([r["n_tokens"] for r in a_recs]))
+            med_toks = float(np.median([r["n_tokens"] for r in a_recs]))
+            m_rep8 = float(np.mean([r["rep_8gram_ratio"] for r in a_recs])) * 100.0
+            m_tail_rep8 = float(np.mean([r["tail_rep_8gram_ratio"] for r in a_recs])) * 100.0
+            w_s = float(sum(r["wall_time_s"] for r in a_recs))
+
+            cum_summary_rows.append(
+                {
+                    "alpha": a_val,
+                    "n_problems": n_tot,
+                    "correct": n_corr,
+                    "accuracy": round(n_corr / n_tot, 4),
+                    "accuracy_pct": round((n_corr / n_tot) * 100.0, 2),
+                    "hit_cap_count": n_cap_cnt,
+                    "hit_cap_pct": round((n_cap_cnt / n_tot) * 100.0, 2),
+                    "mean_tokens": round(m_toks, 1),
+                    "median_tokens": round(med_toks, 1),
+                    "mean_rep_8gram_pct": round(m_rep8, 2),
+                    "mean_tail_rep_8gram_pct": round(m_tail_rep8, 2),
+                    "wall_time_s": round(w_s, 2),
+                    "sec_per_problem": round(w_s / n_tot, 2),
+                }
+            )
+
+        s_df = pd.DataFrame(cum_summary_rows).sort_values("alpha").reset_index(drop=True)
+        s_df.to_csv(summary_csv, index=False)
+        p_df = pd.DataFrame([{k: v for k, v in r.items() if k != "text"} for r in cum_records])
+        p_df.to_csv(per_problem_csv, index=False)
+        save_sweep_charts(s_df, p_df, out_dir=out_dir)
+        return s_df, p_df
 
     for alpha in alphas:
         alpha_f = float(alpha)
@@ -540,7 +584,6 @@ def run_sweep(
         pending = [p for p in problems if (alpha_f, p["unique_id"]) not in cached_records]
         # Length-bucket by prompt length to minimize left-padding overhead during chunked prefill
         pending.sort(key=lambda p: len(p["problem"]))
-        alpha_t0 = time.perf_counter()
 
         if pending:
             starts = list(range(0, len(pending), batch_size))
@@ -583,58 +626,18 @@ def run_sweep(
                     flush=True,
                 )
 
-        alpha_records = [cached_records[(alpha_f, p["unique_id"])] for p in problems]
-        all_records.extend(alpha_records)
-
-        n_total = len(alpha_records)
-        n_correct = sum(1 for r in alpha_records if r["correct"])
-        n_cap = sum(1 for r in alpha_records if r["hit_cap"])
-        mean_toks = float(np.mean([r["n_tokens"] for r in alpha_records]))
-        median_toks = float(np.median([r["n_tokens"] for r in alpha_records]))
-        mean_rep8 = float(np.mean([r["rep_8gram_ratio"] for r in alpha_records])) * 100.0
-        mean_tail_rep8 = float(np.mean([r["tail_rep_8gram_ratio"] for r in alpha_records])) * 100.0
-        wall_s = float(sum(r["wall_time_s"] for r in alpha_records))
-        if pending and len(pending) == len(problems):
-            wall_s = round(time.perf_counter() - alpha_t0, 2)
-
-        row_summary = {
-            "alpha": alpha_f,
-            "n_problems": n_total,
-            "correct": n_correct,
-            "accuracy": round(n_correct / n_total, 4),
-            "accuracy_pct": round((n_correct / n_total) * 100.0, 2),
-            "hit_cap_count": n_cap,
-            "hit_cap_pct": round((n_cap / n_total) * 100.0, 2),
-            "mean_tokens": round(mean_toks, 1),
-            "median_tokens": round(median_toks, 1),
-            "mean_rep_8gram_pct": round(mean_rep8, 2),
-            "mean_tail_rep_8gram_pct": round(mean_tail_rep8, 2),
-            "wall_time_s": round(wall_s, 2),
-            "sec_per_problem": round(wall_s / n_total, 2),
-        }
-        summary_rows.append(row_summary)
+        summary_df, per_problem_df = _build_cumulative_outputs()
+        row_s = summary_df[summary_df["alpha"] == alpha_f].iloc[0]
         print(
-            f"[Summary α={alpha_f:g}] Accuracy={row_summary['accuracy_pct']:.1f}% ({n_correct}/{n_total}) | "
-            f"Hit Cap={row_summary['hit_cap_pct']:.1f}% | Mean Tokens={row_summary['mean_tokens']:.1f} | "
-            f"8-gram Rep={row_summary['mean_rep_8gram_pct']:.1f}% | Wall={row_summary['wall_time_s']:.1f}s",
+            f"[Summary α={alpha_f:g}] Accuracy={row_s['accuracy_pct']:.1f}% ({int(row_s['correct'])}/{int(row_s['n_problems'])}) | "
+            f"Hit Cap={row_s['hit_cap_pct']:.1f}% | Mean Tokens={row_s['mean_tokens']:.1f} | "
+            f"8-gram Rep={row_s['mean_rep_8gram_pct']:.1f}% | Wall={row_s['wall_time_s']:.1f}s",
             flush=True,
         )
 
-        # Save intermediate CSVs and charts after each alpha completes
-        summary_df = pd.DataFrame(summary_rows).sort_values("alpha").reset_index(drop=True)
-        summary_df.to_csv(summary_csv, index=False)
-        per_problem_df = pd.DataFrame(
-            [{k: v for k, v in r.items() if k != "text"} for r in all_records]
-        )
-        per_problem_df.to_csv(per_problem_csv, index=False)
-        save_sweep_charts(summary_df, per_problem_df, out_dir=out_dir)
-
-    summary_df = pd.DataFrame(summary_rows).sort_values("alpha").reset_index(drop=True)
-    summary_df.to_csv(summary_csv, index=False)
-    per_problem_df = pd.DataFrame(
-        [{k: v for k, v in r.items() if k != "text"} for r in all_records]
-    )
-    c1, c2 = save_sweep_charts(summary_df, per_problem_df, out_dir=out_dir)
+    summary_df, per_problem_df = _build_cumulative_outputs()
+    c1 = os.path.join(out_dir, "sweep_charts.png")
+    c2 = os.path.join(out_dir, "alpha_token_distributions.png")
     print(f"[Saved] Summary CSV -> {summary_csv}", flush=True)
     print(f"[Saved] Per-problem CSV -> {per_problem_csv}", flush=True)
     print(f"[Saved] Charts -> {c1}, {c2}", flush=True)
@@ -650,7 +653,7 @@ def main() -> None:
         default="0,0.5,1.0,1.25,1.5",
         help="Comma-separated list of alpha values (default: 0,0.5,1.0,1.25,1.5)",
     )
-    parser.add_argument("--batch-size", type=int, default=6, help="Batch size for generation (default: 6)")
+    parser.add_argument("--batch-size", type=int, default=10, help="Batch size for generation (default: 10)")
     parser.add_argument("--max-new-tokens", type=int, default=4096, help="Max new tokens (default: 4096)")
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top-p", type=float, default=0.95)
