@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "watch-the-loop-break"
+version = "0.1.0"
+description = "Reproducing and extending Sparks of Weight-Space Programming on Qwen3.5-0.8B with weight interpolation (blend(alpha)), live Gradio side-by-side streaming, and an alpha dose-response sweep on MATH-500."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "torch>=2.4.0",
+    "transformers>=4.48.0",
+    "safetensors>=0.4.0",
+    "accelerate>=0.30.0",
+    "datasets>=2.19.0",
+    "huggingface_hub>=0.23.0",
+    "gradio>=5.0.0",
+    "matplotlib>=3.8.0",
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "math-verify>=0.7.0",
+    "pillow>=10.0.0",
+    "tqdm>=4.66.0",
+]
+
+[project.scripts]
+watch-the-loop-break-app = "app:main"
+watch-the-loop-break-sweep = "sweep:main"
+watch-the-loop-break-verify = "weights:main"
