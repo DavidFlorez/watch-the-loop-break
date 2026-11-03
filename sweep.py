@@ -57,8 +57,11 @@ def load_model_and_tokenizer(
     repo_id: str = BASE_MODEL_ID,
     device: Optional[str] = None,
     dtype: Optional[torch.dtype] = None,
+    drop_visual: bool = True,
 ) -> Tuple[Any, Any, str, torch.dtype, str]:
     """Load `Qwen/Qwen3.5-0.8B` and its tokenizer on auto-detected hardware."""
+    import gc
+
     install_fast_qwen35_kernels()
     dev, dt, hw_desc = detect_hardware(device)
     if dtype is not None:
@@ -69,8 +72,6 @@ def load_model_and_tokenizer(
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
 
-    # Qwen3.5-0.8B is released under Qwen3_5ForConditionalGeneration / AutoModelForMultimodalLM
-    # or AutoModelForImageTextToText / AutoModelForCausalLM depending on transformers version.
     model = None
     load_errors = []
     for loader_name in ("AutoModelForMultimodalLM", "AutoModelForImageTextToText", "AutoModelForCausalLM"):
@@ -88,8 +89,15 @@ def load_model_and_tokenizer(
     if model is None:
         raise RuntimeError(f"Failed to load {repo_id}: {'; '.join(load_errors)}")
 
+    # Free unused ViT vision encoder weights (~220 MB) for text-only math reasoning
+    if drop_visual and hasattr(model, "model") and hasattr(model.model, "visual"):
+        del model.model.visual
+        gc.collect()
+
     model.to(dev)
     model.eval()
+    if dev == "mps" and hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()
 
     # Pre-warm torch.linalg.solve_triangular (used by Qwen3.5 gated delta rule)
     try:
@@ -196,7 +204,8 @@ def generate_batch(
         logits_to_keep=1,
     )
     past = out.past_key_values
-    logits = out.logits[:, -1, :].float()
+    logits = out.logits[:, -1, :]
+    del out
     seen_penalty = (
         torch.zeros_like(logits) if presence_penalty > 0.0 else None
     )
@@ -211,9 +220,10 @@ def generate_batch(
                 use_cache=True,
                 logits_to_keep=1,
             )
-            logits = out.logits[:, -1, :].float()
+            logits = out.logits[:, -1, :]
+            del out
             if seen_penalty is not None:
-                logits.sub_(seen_penalty)
+                logits = logits - seen_penalty
 
         if temperature > 0.0:
             if top_k > 0:
@@ -221,8 +231,8 @@ def generate_batch(
                     logits, k=min(int(top_k), logits.shape[-1]), dim=-1
                 )
             else:
-                cand_logits, cand_indices = torch.sort(logits, descending=True, dim=-1)
-            cand_logits = cand_logits / float(temperature)
+                cand_logits, cand_indices = torch.sort(logits.float(), descending=True, dim=-1)
+            cand_logits = cand_logits.float() / float(temperature)
             probs = torch.softmax(cand_logits, dim=-1)
             if 0.0 < top_p < 1.0:
                 cum_probs = torch.cumsum(probs, dim=-1)
@@ -271,10 +281,10 @@ def generate_batch(
                 model.model.rope_deltas = model.model.rope_deltas.index_select(0, keep_idx)
             active_slots = [active_slots[r] for r in keep_rows]
 
-        if device == "mps" and (step + 1) % 64 == 0 and hasattr(torch.mps, "empty_cache"):
+        if device == "mps" and (step + 1) % 16 == 0 and hasattr(torch.mps, "empty_cache"):
             torch.mps.empty_cache()
 
-    del past, out, seen_penalty, full_mask
+    del past, seen_penalty, full_mask
     if device == "cuda":
         torch.cuda.synchronize()
     elif device == "mps":
@@ -470,7 +480,7 @@ def save_sweep_charts(
 def run_sweep(
     n_problems: int = 50,
     alphas: Sequence[float] = DEFAULT_ALPHAS,
-    batch_size: int = 8,
+    batch_size: int = 6,
     max_new_tokens: int = 4096,
     temperature: float = 0.6,
     top_p: float = 0.95,
@@ -640,7 +650,7 @@ def main() -> None:
         default="0,0.5,1.0,1.25,1.5",
         help="Comma-separated list of alpha values (default: 0,0.5,1.0,1.25,1.5)",
     )
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for generation (default: 8)")
+    parser.add_argument("--batch-size", type=int, default=6, help="Batch size for generation (default: 6)")
     parser.add_argument("--max-new-tokens", type=int, default=4096, help="Max new tokens (default: 4096)")
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top-p", type=float, default=0.95)

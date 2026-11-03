@@ -321,13 +321,12 @@ def install_fast_qwen35_kernels() -> bool:
         _, hidden_size, seq_len = hidden_states.shape
         if seq_len == 1:
             conv_state.copy_(torch.cat([conv_state[:, :, 1:], hidden_states], dim=-1))
-            w = weight.to(hidden_states.dtype)
-            out = (conv_state.to(hidden_states.dtype) * w.unsqueeze(0)).sum(dim=-1, keepdim=True)
+            out = (conv_state.float() * weight.float().unsqueeze(0)).sum(dim=-1, keepdim=True)
             if bias is not None:
-                out = out + bias.to(hidden_states.dtype).view(1, -1, 1)
+                out = out + bias.float().view(1, -1, 1)
             if activation is not None:
                 out = mq.ACT2FN[activation](out)
-            return out
+            return out.to(hidden_states.dtype)
         return orig_conv(hidden_states, conv_state, weight, bias, activation)
 
     def fast_recurrent_gated_delta_rule(
@@ -352,10 +351,11 @@ def install_fast_qwen35_kernels() -> bool:
             q_t = q_t * (q_t.shape[-1] ** -0.5)
             decay_t = g.squeeze(1).float().exp().unsqueeze(-1).unsqueeze(-1)
             beta_t = beta.squeeze(1).float().unsqueeze(-1)
-            state = initial_state.float() * decay_t
+            state = initial_state if initial_state.dtype == torch.float32 else initial_state.float()
+            state.mul_(decay_t)
             kv_mem = torch.matmul(k_t.unsqueeze(-2), state).squeeze(-2)
             delta = (v_t - kv_mem) * beta_t
-            state = state + torch.matmul(k_t.unsqueeze(-1), delta.unsqueeze(-2))
+            state.add_(torch.matmul(k_t.unsqueeze(-1), delta.unsqueeze(-2)))
             out = torch.matmul(q_t.unsqueeze(-2), state).squeeze(-2).unsqueeze(1).to(initial_dtype)
             return out, (state if output_final_state else None)
         return orig_rec(
