@@ -254,25 +254,21 @@ def _sample_next_token(
     if temperature <= 1e-5:
         return int(torch.argmax(scores).item())
 
-    scores = scores / float(temperature)
-
     if top_k > 0 and top_k < scores.shape[-1]:
-        topk_vals, _ = torch.topk(scores, int(top_k))
-        min_topk = topk_vals[-1]
-        scores = torch.where(scores < min_topk, torch.full_like(scores, float("-inf")), scores)
+        cand_logits, cand_indices = torch.topk(scores, int(top_k))
+    else:
+        cand_logits, cand_indices = torch.sort(scores, descending=True)
+
+    cand_logits = cand_logits / float(temperature)
+    probs = torch.softmax(cand_logits, dim=-1)
 
     if 0.0 < top_p < 1.0:
-        sorted_logits, sorted_indices = torch.sort(scores, descending=True)
-        cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-        sorted_indices_to_remove = cumulative_probs > float(top_p)
-        sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
-        sorted_indices_to_remove[0] = False
-        indices_to_remove = sorted_indices[sorted_indices_to_remove]
-        scores[indices_to_remove] = float("-inf")
+        cum_probs = torch.cumsum(probs, dim=-1)
+        remove_mask = (cum_probs - probs) > float(top_p)
+        probs = probs.masked_fill(remove_mask, 0.0)
 
-    probs = torch.softmax(scores, dim=-1)
-    next_token = torch.multinomial(probs, num_samples=1)
-    return int(next_token.item())
+    sampled_rel = torch.multinomial(probs, num_samples=1)
+    return int(cand_indices[sampled_rel].item())
 
 
 @torch.no_grad()
@@ -352,9 +348,12 @@ def stream_side_by_side(
     torch.manual_seed(int(seed))
     t0 = time.perf_counter()
 
+    if hasattr(model, "model") and hasattr(model.model, "rope_deltas"):
+        model.model.rope_deltas = None
+
     # Prefill Left
     apply_weights_fast(left_blended)
-    out_l = model(input_ids=prompt_ids, use_cache=True)
+    out_l = model(input_ids=prompt_ids, use_cache=True, logits_to_keep=1)
     past_l = out_l.past_key_values
     gen_l: List[int] = []
     next_tok_l = _sample_next_token(out_l.logits[:, -1, :], gen_l, temp, tp, tk, pp)
@@ -363,15 +362,17 @@ def stream_side_by_side(
 
     # Prefill Right
     torch.manual_seed(int(seed))
+    if hasattr(model, "model") and hasattr(model.model, "rope_deltas"):
+        model.model.rope_deltas = None
     apply_weights_fast(right_blended)
-    out_r = model(input_ids=prompt_ids, use_cache=True)
+    out_r = model(input_ids=prompt_ids, use_cache=True, logits_to_keep=1)
     past_r = out_r.past_key_values
     gen_r: List[int] = []
     next_tok_r = _sample_next_token(out_r.logits[:, -1, :], gen_r, temp, tp, tk, pp)
     gen_r.append(next_tok_r)
     done_r = next_tok_r in eos_ids
 
-    emit_every = 6  # Update UI every 6 generated steps for smooth streaming
+    emit_every = 8  # Update UI every 8 generated steps for smooth streaming
 
     for step in range(1, max_toks):
         if done_l and done_r:
@@ -380,7 +381,7 @@ def stream_side_by_side(
         if not done_l:
             apply_weights_fast(left_blended)
             inp_l = torch.tensor([[gen_l[-1]]], device=device, dtype=torch.long)
-            out_l = model(input_ids=inp_l, past_key_values=past_l, use_cache=True)
+            out_l = model(input_ids=inp_l, past_key_values=past_l, use_cache=True, logits_to_keep=1)
             past_l = out_l.past_key_values
             nt_l = _sample_next_token(out_l.logits[:, -1, :], gen_l, temp, tp, tk, pp)
             gen_l.append(nt_l)
@@ -390,7 +391,7 @@ def stream_side_by_side(
         if not done_r:
             apply_weights_fast(right_blended)
             inp_r = torch.tensor([[gen_r[-1]]], device=device, dtype=torch.long)
-            out_r = model(input_ids=inp_r, past_key_values=past_r, use_cache=True)
+            out_r = model(input_ids=inp_r, past_key_values=past_r, use_cache=True, logits_to_keep=1)
             past_r = out_r.past_key_values
             nt_r = _sample_next_token(out_r.logits[:, -1, :], gen_r, temp, tp, tk, pp)
             gen_r.append(nt_r)
