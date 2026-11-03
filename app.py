@@ -77,7 +77,7 @@ def get_math500_problems() -> List[Dict[str, Any]]:
         _MATH500_CACHE = [
             {
                 "idx": 0,
-                "label": "[000]Precalculus (L2) | test/precalculus/807.json — Convert the point (0,3) in rectangular coordinates to polar...",
+                "label": "[000] Precalculus (L2) | test/precalculus/807.json — Convert the point (0,3) in rectangular coordinates to polar...",
                 "unique_id": "test/precalculus/807.json",
                 "problem": "Convert the point $(0,3)$ in rectangular coordinates to polar coordinates. Enter your answer in the form $(r,\\theta),$ where $r > 0$ and $0 \\le \\theta < 2 \\pi.$",
                 "answer": "\\left( 3, \\frac{\\pi}{2} \\right)",
@@ -398,6 +398,9 @@ def stream_side_by_side(
             if nt_r in eos_ids:
                 done_r = True
 
+        if device == "mps" and (step + 1) % 64 == 0 and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+
         if (step + 1) % emit_every == 0 or (done_l and done_r) or (step + 1 == max_toks):
             elapsed = max(time.perf_counter() - t0, 1e-3)
             text_l = tok.decode(gen_l, skip_special_tokens=False)
@@ -425,6 +428,9 @@ def stream_side_by_side(
                 alpha_r, rep_r, tail_r, len(gen_r), max_toks, len(gen_r) / elapsed, status_r, hit_cap_r, pred_r, gold_answer, ok_r
             )
             yield html_l, text_l, html_r, text_r
+
+    if device == "mps" and hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()
 
 
 def load_recorded_sweep_pairs(jsonl_path: str = "assets/sweep_per_problem.jsonl") -> Dict[str, Dict[float, Dict[str, Any]]]:
@@ -523,7 +529,7 @@ def on_problem_select(problem_label: str) -> Tuple[str, str]:
     return "", ""
 
 
-def build_demo() -> gr.Blocks:
+def build_demo(default_max_tokens: int = 4096) -> gr.Blocks:
     _, _, hw_desc = detect_hardware()
     problems = get_math500_problems()
     recorded = load_recorded_sweep_pairs()
@@ -534,18 +540,19 @@ def build_demo() -> gr.Blocks:
             default_prob = p
             break
 
+    max_tok_init = int(max(128, min(4096, default_max_tokens)))
     init_left_html = render_repetition_meter_html(
-        0.0, 0.0, 0.0, 0, 4096, 0.0, "idle", False, None, default_prob["answer"], None
+        0.0, 0.0, 0.0, 0, max_tok_init, 0.0, "idle", False, None, default_prob["answer"], None
     )
     init_right_html = render_repetition_meter_html(
-        1.0, 0.0, 0.0, 0, 4096, 0.0, "idle", False, None, default_prob["answer"], None
+        1.0, 0.0, 0.0, 0, max_tok_init, 0.0, "idle", False, None, default_prob["answer"], None
     )
 
     with gr.Blocks(title="Watch the Loop Break — Weight-Space Programming") as demo:
         gr.Markdown(
             f"""# 🧠 Watch the Loop Break: Weight-Space Programming Explorer
 Reproducing & extending **[Sparks of Weight-Space Programming](https://rikiyat.github.io/blog/weight-space-programming/)** on `Qwen/Qwen3.5-0.8B` vs. `RikiyaT/Qwen3.5-0.8B-weight-space-programming`.
-Only **2 tensors** (`layers.15.mlp.down_proj.weight` and `layers.19.mlp.down_proj.weight` — 64 columns each, 0.016% of parameters) differ between Base ($\alpha=0$) and Edited ($\alpha=1$).
+Only **2 tensors** (`layers.15.mlp.down_proj.weight` and `layers.19.mlp.down_proj.weight` — 64 columns each, 0.0150% of parameters) differ between Base ($\alpha=0$) and Edited ($\alpha=1$).
 Use `blend(alpha)` to set $W(\alpha) = W_{{\text{{base}}}} + \alpha(W_{{\text{{edit}}}} - W_{{\text{{base}}}})$ and watch the repetition loop break in real time.
 **Hardware detected:** `{hw_desc}`"""
         )
@@ -587,7 +594,7 @@ Use `blend(alpha)` to set $W(\alpha) = W_{{\text{{base}}}} + \alpha(W_{{\text{{e
             max_tokens_slider = gr.Slider(
                 minimum=128,
                 maximum=4096,
-                value=4096,
+                value=max_tok_init,
                 step=128,
                 label="Max New Tokens (Cap)",
             )
@@ -657,9 +664,10 @@ Use `blend(alpha)` to set $W(\alpha) = W_{{\text{{base}}}} + \alpha(W_{{\text{{e
 def main() -> None:
     parser = argparse.ArgumentParser(description="Launch the watch-the-loop-break Gradio app")
     parser.add_argument("--port", type=int, default=7860, help="Local port (default: 7860)")
+    parser.add_argument("--max-tokens", type=int, default=4096, help="Default max new tokens (default: 4096)")
     args = parser.parse_args()
 
-    demo = build_demo()
+    demo = build_demo(default_max_tokens=args.max_tokens)
     # TODO(security): For multi-user non-local deployment, add OAuth/MFA authentication and rate limiting.
     # Binding strictly to 127.0.0.1 per secure web testing guidelines.
     demo.launch(server_name="127.0.0.1", server_port=args.port, share=False)

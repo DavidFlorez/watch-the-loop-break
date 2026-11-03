@@ -6,10 +6,10 @@ Reproducing and extending Experiment 8 of **["Sparks of Weight-Space Programming
 
 ## Overview
 
-Tiny reasoning models frequently fail on competition math not because they cannot perform the algebra, but because their `<think>` chain enters a **repetitive loop** until exhausting the token limit. In *Weight-Space Programming*, a frontier LLM ("Astra") inspected `Qwen/Qwen3.5-0.8B`'s weights without gradients or training, isolated the repetition loop to a single residual direction written by the MLPs of **Layer 15** and **Layer 19**, and projected that direction out of 64 columns in each layer's `down_proj.weight` (`131,072` entries = `0.016%` of the model).
+Tiny reasoning models frequently fail on competition math not because they cannot perform the algebra, but because their `<think>` chain enters a **repetitive loop** until exhausting the token limit. In *Weight-Space Programming*, a frontier LLM ("Astra") inspected `Qwen/Qwen3.5-0.8B`'s weights without gradients or training, isolated the repetition loop to a single residual direction written by the MLPs of **Layer 15** and **Layer 19**, and projected that direction out of 64 columns in each layer's `down_proj.weight` (`131,072` entries = `0.0150%` of the model).
 
 This repository:
-1. **Verifies the exact weight-space diff (`weights.py`)**: Confirms across all 320 tensors (`852,985,920` parameters) that **only** `model.language_model.layers.15.mlp.down_proj.weight` and `model.language_model.layers.19.mlp.down_proj.weight` differ, verifies their `bfloat16` SHA-256 digests, and proves via SVD that both edits are exact **rank-1 projections** ($\sigma_1^2 / \sum \sigma_i^2 > 99.999\%$).
+1. **Verifies the exact weight-space diff (`weights.py`)**: Confirms across all 488 tensors (`873,438,784` parameters) that **only** `model.language_model.layers.15.mlp.down_proj.weight` and `model.language_model.layers.19.mlp.down_proj.weight` differ, verifies their `bfloat16` SHA-256 digests, and proves via SVD that both edits are exact **rank-1 projections** ($\sigma_1^2 / \sum \sigma_i^2 > 99.999\%$).
 2. **Implements continuous weight-space interpolation (`blend(alpha)`)**:
    $$W(\alpha) = W_{\text{base}} + \alpha \cdot (W_{\text{edit}} - W_{\text{base}})$$
    Allowing continuous tuning from the unmodified base model ($\alpha = 0$), through partial loop suppression ($\alpha = 0.5$), the published edit ($\alpha = 1.0$), and over-projection ($\alpha \in \{1.25, 1.5\}$).
