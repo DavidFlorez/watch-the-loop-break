@@ -71,21 +71,28 @@ def detect_hardware(preferred: Optional[str] = None) -> Tuple[str, torch.dtype, 
     return device, dtype, desc
 
 
+def _cached_hf_download(repo_id: str, filename: str) -> str:
+    try:
+        return hf_hub_download(repo_id=repo_id, filename=filename, local_files_only=True)
+    except Exception:
+        return hf_hub_download(repo_id=repo_id, filename=filename)
+
+
 def resolve_safetensors_files(repo_id: str) -> Dict[str, str]:
     """Return mapping of `{tensor_name: local_safetensors_filepath}` for a HF repo."""
     try:
-        idx_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors.index.json")
+        idx_path = _cached_hf_download(repo_id=repo_id, filename="model.safetensors.index.json")
         with open(idx_path, "r", encoding="utf-8") as f:
             index_data = json.load(f)
         weight_map: Dict[str, str] = index_data["weight_map"]
         shard_files = sorted(set(weight_map.values()))
         local_shards = {
-            shard: hf_hub_download(repo_id=repo_id, filename=shard)
+            shard: _cached_hf_download(repo_id=repo_id, filename=shard)
             for shard in shard_files
         }
         return {tensor_name: local_shards[shard] for tensor_name, shard in weight_map.items()}
     except Exception:
-        single_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors")
+        single_path = _cached_hf_download(repo_id=repo_id, filename="model.safetensors")
         with safe_open(single_path, framework="pt", device="cpu") as f:
             keys = list(f.keys())
         return {k: single_path for k in keys}
