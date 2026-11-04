@@ -13,12 +13,11 @@ Reproduce the Qwen3.5-0.8B "Weight-Space Programming" result ([Takehi et al., 20
 - **Dataset**:
   - [`HuggingFaceH4/MATH-500`](https://huggingface.co/datasets/HuggingFaceH4/MATH-500) (`test` split, 500 competition math problems across 7 subjects and 5 difficulty levels; deterministic $N=50$ evaluation subset sampled with `seed=0`)
 - **Hardware**:
-  - Apple MacBook Air (`Mac15,12`), Apple M3 chip (8-core CPU, 10-core GPU), 16 GB unified memory (`mps` backend auto-detected via `CUDA -> MPS -> CPU` fallback in [`detect_hardware`](weights.py))
-- **Library Versions** ([`requirements.txt`](requirements.txt)):
-  - Python `3.13.7`
-  - `torch==2.14.1`, `transformers==5.21.0`, `safetensors==0.8.0`, `accelerate==1.15.0`
-  - `datasets==5.1.0`, `huggingface_hub==2.3.0`, `gradio==6.30.0`, `math-verify==0.9.0`
-  - `numpy==2.5.4`, `pandas==3.1.0`, `matplotlib==3.11.2`, `pillow==12.3.0`, `tqdm==4.70.1`
+  - **Local (MPS)**: Apple MacBook Air (`Mac15,12`), Apple M3 chip (8-core CPU, 10-core GPU), 16 GB unified memory (`mps` backend auto-detected via `CUDA -> MPS -> CPU` fallback in [`detect_hardware`](weights.py))
+  - **Cloud GPU (vLLM)**: NVIDIA T4 (`16 GB` VRAM, Turing `CC 7.5`) on Google Colab (`1x T4`) or Kaggle (`2x T4`) via [`notebooks/gpu_sweep.ipynb`](notebooks/gpu_sweep.ipynb)
+- **Library Versions**:
+  - **Local / MPS ([`requirements.txt`](requirements.txt))**: Python `3.13.7`, `torch==2.14.1`, `transformers==5.21.0`, `safetensors==0.8.0`, `accelerate==1.15.0`, `datasets==5.1.0`, `huggingface_hub==2.3.0`, `gradio==6.30.0`, `math-verify==0.9.0`, `numpy==2.5.4`, `pandas==3.1.0`, `matplotlib==3.11.2`, `pillow==12.3.0`, `tqdm==4.70.1`
+  - **Cloud GPU / vLLM ([`requirements-gpu.txt`](requirements-gpu.txt))**: `vllm==0.33.0`, `torch==2.14.0`, `transformers>=5.16.1,<5.21.0`, `datasets`, `math-verify==0.9.0`, `safetensors>=0.6.2`, `huggingface_hub>=1.31.0` *(kept separate because `requirements.txt`'s `transformers==5.21.0` and `torch==2.14.1` conflict with `vllm==0.33.0`)*
 
 ## Log
 
@@ -43,7 +42,11 @@ Reproduce the Qwen3.5-0.8B "Weight-Space Programming" result ([Takehi et al., 20
 
 - **2026-11-03 15:20–15:30 PST — Side-by-side Gradio app polish, headless Chrome capture, and unit tests**
   - **What broke #3**: Initial headless Chrome capture showed Gradio dark-mode `.prose` CSS overriding text color inside white meter cards (`#334155` rendered light gray on `#ffffff`) and unescaped `\alpha` / `\text` in Markdown.
-  - **Fix #3**: Enforced explicit high-contrast inline `#0f172a` / `#1e293b` styles in [`render_repetition_meter_html`](app.py), replaced raw TeX escapes with clean Unicode math, paced [`replay_recorded_comparison`](app.py) by token progress so shorter solved runs finish visually before capped base runs, and verified all 7 unit tests in [`tests/test_core.py`](tests/test_core.py) (`0.510s`, `OK`).
+  - **Fix #3**: Enforced explicit high-contrast inline `#0f172a` / `#1e293b` styles in [`render_repetition_meter_html`](app.py), replaced raw TeX escapes with clean Unicode math, paced [`replay_recorded_comparison`](app.py) by token progress so shorter solved runs finish visually before capped base runs, and verified all 7 unit tests in [`tests/test_core.py`](tests/test_core.py).
+
+- **2026-11-03 16:15 PST — Added vLLM GPU Execution Path (`gpu/`, `requirements-gpu.txt`, `notebooks/gpu_sweep.ipynb`)**
+  - Added [`requirements-gpu.txt`](requirements-gpu.txt) pinning `vllm==0.33.0` (`torch==2.14.0`, `transformers>=5.16.1,<5.21.0`) separately from MPS `requirements.txt`.
+  - Implemented [`gpu/make_ckpt.py`](gpu/make_ckpt.py) (builds temporary `bfloat16` safetensors checkpoints at revision `2fc06364715b967f1860aea9cf38778875588b17` in scratch directories outside git with SHA-256 & `config.json` assertions), [`gpu/smoke_test.py`](gpu/smoke_test.py) (8-problem greedy `fp16` vs `fp32` check with NaN/corruption + 128-token prefix divergence gating), [`gpu/vllm_sweep.py`](gpu/vllm_sweep.py) (single-alpha process isolation, `mamba_ssm_cache_dtype="float32"`, compatibility fallbacks for `language_model_only` and `enforce_eager`, Pass 1 + Pass 2 forced `</think>` answer continuation on capped traces, strict vs forced accuracy, Wilson 95% CIs, and `fcntl.flock` atomic multi-GPU merging), [`gpu/aggregate.py`](gpu/aggregate.py), and [`notebooks/gpu_sweep.ipynb`](notebooks/gpu_sweep.ipynb) (supporting 2-GPU parallel execution on Kaggle `T4 x2` and 1-GPU on Colab `T4`).
 
 ## Key results
 
@@ -57,7 +60,7 @@ Reproduce the Qwen3.5-0.8B "Weight-Space Programming" result ([Takehi et al., 20
   - Principal left singular vectors align across layers 15 and 19 with $\cos(u_{15}, u_{19}) = \mathbf{0.8490}$.
   - `blend(0.0)` and `blend(1.0)` match the exact `bfloat16` SHA-256 digests of the base and edited checkpoints.
 
-### 2. MATH-500 $\alpha$-Sweep Results ($N=50$, `max_new_tokens=4096`) ([`assets/sweep_results.csv`](assets/sweep_results.csv))
+### 2. MATH-500 $\alpha$-Sweep Results ($N=50$, `max_new_tokens=4096` on MPS) ([`assets/sweep_results.csv`](assets/sweep_results.csv))
 
 Measured on 50 deterministic `HuggingFaceH4/MATH-500` problems (`seed=0`, `temperature=0.6`, `top_p=0.95`, `top_k=20`, `presence_penalty=1.5`, `enable_thinking=True`) using `math-verify` + Hendrycks LaTeX grading:
 
@@ -69,9 +72,12 @@ Measured on 50 deterministic `HuggingFaceH4/MATH-500` problems (`seed=0`, `tempe
 | **1.25** (**Optimal @ 4k**) | $7.5\times$ | **6 / 50** | **12.0%** | **88.0% (44/50)** | **3982.9** | 2.69% | 1.35% | 1995.77s | 39.92s |
 | **1.50** (Over-ablation) | $9.0\times$ | 4 / 50 | 8.0% | 92.0% (46/50) | 4019.4 | **2.37%** | **0.74%** | **1890.71s** | **37.81s** |
 
-- **Official 32k Budget Comparison (`RikiyaT/lm_understand-logs` `exp8_math/runs/p50c`)**:
-  - Base (`alpha=0.0`, `max_new_tokens=32768`): `5.0%` accuracy, `95.0%` cut share, `31,690.0` mean tokens, `73.79%` mean repeated 8-gram ratio (`79.84%` median).
-  - Edited (`alpha=1.0`, `max_new_tokens=32768`): `51.0%` accuracy, `31.6%` cut share, `21,703.8` mean tokens, `23.09%` mean repeated 8-gram ratio (`16.50%` median).
+- **Official 32k Budget Comparison (`RikiyaT/lm_understand-logs` `exp8_math/runs/p50c` `merged.json`)**:
+  - **Paper 32k Base (`alpha=0.0`, `max_new_tokens=32768`)**: **`7.9%`** strict accuracy / **`93.0%`** cut share.
+  - **Paper 32k Edited (`alpha=1.0`, `p50c`, `max_new_tokens=32768`)**: **`48.1%`** strict accuracy / **`33.05%`** cut share.
+- **GPU Two-Pass Evaluation Protocol (`gpu/vllm_sweep.py`)**:
+  - **Strict Accuracy (`pred_strict` / `correct_strict`)**: Evaluates [`extract_last_boxed_strict`](metrics.py) strictly after the final `</think>` tag (no fallback into unclosed thinking blocks), averaged across all $N \times S$ samples (`avg@n`) with 95% Wilson confidence intervals ([`wilson_ci`](metrics.py)).
+  - **Forced-Answer Accuracy (`pred_forced` / `correct_forced`)**: For every sample hitting the Pass-1 `budget` cap, appends `\n\nConsidering the limited time, I have to give the solution based on the thinking directly now.\n</think>\n\n` and generates up to `512` additional tokens on the same loaded model to measure how many capped traces already solved the problem internally before running out of thinking budget.
 - **MPS Decode Kernel Speedup**:
   - Replacing `transformers`'s pure-PyTorch `causal_conv1d_update` and 4D-broadcast `torch_recurrent_gated_delta_rule` + dropping unused visual weights reduced 512 decode steps (`B=10`) from `148.9s` (under swap) down to **`40–45s`** (~`111–125 tok/s` across 10 sequences; `3.34x` throughput scaling from `B=1` `8.9 tok/s` to `B=8` `29.7 tok/s` at `2.29 GB` MPS driver memory).
 
@@ -82,23 +88,27 @@ Measured on 50 deterministic `HuggingFaceH4/MATH-500` problems (`seed=0`, `tempe
 - `assets/app_side_by_side.gif` — Animated capture of `app.py` streaming Base (`α = 0.00`) vs. Edited (`α = 1.00`), showing the edited model boxing `-1` while the base model keeps circling until hitting the red `TOKEN CAP HIT` alert.
 - `assets/sweep_charts.png` — Four-panel dose-response dashboard across $\alpha \in [0, 0.5, 1.0, 1.25, 1.5]$ showing MATH-500 accuracy peaking at $\alpha = 1.25$ (`12.0%`), 4096-token cap truncation dropping to `88.0%`, full-trace and tail 8-gram repetition collapsing monotonically (`14.71% -> 0.74%`), and evaluation wall times.
 - `assets/alpha_token_distributions.png` — Per-problem token lengths (solved vs. capped/wrong) and token count vs. repeated 8-gram ratio scatter across all 250 runs.
+- `assets/budget_curve_gpu.png` — Cross-budget scaling curve (`4096` MPS + `8192` / `16384` / `32768` GPU vLLM) comparing Strict Accuracy (with 95% Wilson CIs), Pass-2 Forced-Answer Accuracy, and Token-Cap Truncation Rate alongside the paper's 32k benchmarks (`7.9% / 93.0%` Base, `48.1% / 33.05%` Edited).
 
 ## Surprises and limitations
 
 1. **Loop breaking happens immediately by $\alpha = 0.5$–$1.0$, but coherent over-thinking still saturates a 4,096-token budget**:
    - At $\alpha = 0.0$, worst-case traces lock into severe verbatim repetition loops (`test/prealgebra/2066.json` reached `52.1%` overall / `70.8%` tail repeated 8-grams; `test/number_theory/631.json` reached `48.2%` overall / `94.8%` tail repetition).
-   - Raising $\alpha$ from `0.0 -> 0.5 -> 1.0` slashes final-512-token repetition **12×** (`14.71% -> 1.22% -> 1.39%`), completely eliminating verbatim loops. However, because `Qwen3.5-0.8B` was trained for `32,768`-token `<think>` budgets (where $\alpha=1.0$ averages `21,704` tokens and `51.0%` accuracy), a strict `4,096`-token cap still truncates `94.0%` (`47/50`) of $\alpha=1.0$ trajectories mid-verification!
+   - Raising $\alpha$ from `0.0 -> 0.5 -> 1.0` slashes final-512-token repetition **12×** (`14.71% -> 1.22% -> 1.39%`), completely eliminating verbatim loops. However, because `Qwen3.5-0.8B` was trained for `32,768`-token `<think>` budgets, a strict `4,096`-token cap still truncates `94.0%` (`47/50`) of $\alpha=1.0$ trajectories mid-verification.
 2. **Inverted-U dose-response curve ($\alpha = 1.25$ doubles 4k accuracy over $\alpha = 1.0$)**:
    - Extrapolating the directional ablation slightly past the published edit to **$\alpha = 1.25$** ($7.5\times$ subtraction) shortens over-cautious `<think>` verification chains just enough to raise completion before 4,096 tokens (`88.0%` hit cap vs. `94.0%`), **doubling accuracy from `6.0% (3/50)` at $\alpha = 1.0$ to `12.0% (6/50)` at $\alpha = 1.25$** (`3×` base accuracy), while **every single run across $\alpha \in \{0.5, 1.0, 1.25, 1.5\}$ that finished before the 4,096-token cap produced the exact right answer (`100%` precision conditioned on termination: `3/3`, `3/3`, `6/6`, `4/4`)**.
    - Pushing further to **$\alpha = 1.5$** ($9\times$ subtraction) reduces repetition even further (`0.74%` tail), but over-subtracts the residual direction on harder problems, dropping accuracy back to `8.0% (4/50)`.
-3. **Why $\alpha=0$ full-trace 8-gram ratio is `8.44%` at 4k vs `73.8%` at 32k**:
+3. **`fp16` vs. `bf16` numerics on Turing (`T4`) GatedDeltaNet layers**:
+   - `Qwen/Qwen3.5-0.8B` is trained and distributed in `bfloat16` (8-bit exponent, max `~3.4e38`), whereas NVIDIA **T4** (`sm_75`) lacks hardware `bf16` tensor cores and executes native half precision in `float16` (5-bit exponent, max `65,504`). Across 18 GatedDeltaNet recurrent layers, `float16` can occasionally overflow or diverge on long reasoning prefixes; [`gpu/vllm_sweep.py`](gpu/vllm_sweep.py) keeps SSM state caches in `float32` (`mamba_ssm_cache_dtype="float32"`) and [`gpu/smoke_test.py`](gpu/smoke_test.py) gates `float16` against `float32` on 8 greedy prompts (`temperature=0`, `max_tokens=1024`) before any sweep runs.
+4. **Why $\alpha=0$ full-trace 8-gram ratio is `8.44%` at 4k vs. higher ratios at 16k–32k**:
    - Loops in `Qwen3.5-0.8B` typically onset around tokens `2,500–4,500` and then repeat for the remaining `28,000+` tokens under a `32,768` cap. At `4,096` tokens, those loops are caught right as they begin — which is why the final-512-token window (`mean_tail_rep_8gram_pct = 14.71%`, up to `94.8%` on individual problems) exposes the base-model loop onset much more sharply than the full-4096 average.
-4. **Statistical power ($N=50$) & single-machine runtime**:
-   - At $N=50$ under a strict `4,096`-token ceiling, accuracy shifts from `2/50` (`4%`) to `6/50` (`12%`) reflect finite-sample variance; full-dataset (`N=500`) runs at `8192` or `16384` tokens would reduce quantization from the `4096` cutoff.
+5. **Statistical power ($N=50$), `avg@n`, and forced-pass `presence_penalty` scope**:
+   - At $N=50$ single-sample evaluation, accuracy changes move in `2.0%` (`1/50`) discrete steps (`±7–13%` Wilson 95% confidence intervals); `gpu/vllm_sweep.py --samples K` supports multi-sample `avg@n` evaluation with Wilson CIs to reduce sampling variance.
+   - In Pass 2 (forced answer after hitting the token cap), `presence_penalty=1.5` applies across the `512` newly sampled forced-answer tokens rather than carrying over a penalty table from Pass 1's `<think>` prefix—avoiding spurious penalties on mathematical constants/symbols already written during reasoning while still suppressing loops in the final answer block.
 
 ## Open questions / next steps
 
-1. **Decoupled 2D layer interpolation $(\alpha_{15}, \alpha_{19})$**: Since $\cos(u_{15}, u_{19}) = 0.849$, sweeping $\alpha_{15} \neq \alpha_{19}$ (e.g., testing whether Layer 15 controls topic circling while Layer 19 controls token-level repetition) could separate loop breaking from premature stopping.
-2. **Token-budget-aware dynamic $\alpha(t)$ scheduling**: Annealing $\alpha(t)$ upward as $t \to T_{\max}$ (`0.75 -> 1.35`) could preserve full exploration early in `<think>` while nudging the model to conclude and `\boxed{}` cleanly before any deployment token ceiling (`2048` or `4096`).
-3. **Context-length frontier curve (`max_new_tokens` $\in \{2048, 4096, 8192, 16384, 32768\}$)**: Mapping the exact Pareto frontier of accuracy vs. token budget across $\alpha \in [1.0, 1.25]$ to determine whether $\alpha = 1.25$ strictly dominates $\alpha = 1.0$ for low-latency deployment (`<= 8k` tokens).
+1. **Multi-budget frontier evaluation (`8192 -> 16384 -> 32768`) via vLLM**: Run [`notebooks/gpu_sweep.ipynb`](notebooks/gpu_sweep.ipynb) on Kaggle `T4 x2` / Colab `T4` to measure the exact crossover where $\alpha = 1.0$ catches up to or overtakes $\alpha = 1.25$ as thinking truncation drops.
+2. **Decoupled 2D layer interpolation $(\alpha_{15}, \alpha_{19})$**: Since $\cos(u_{15}, u_{19}) = 0.849$, sweeping $\alpha_{15} \neq \alpha_{19}$ (e.g., testing whether Layer 15 controls topic circling while Layer 19 controls token-level repetition) could separate loop breaking from premature stopping.
+3. **Token-budget-aware dynamic $\alpha(t)$ scheduling**: Annealing $\alpha(t)$ upward as $t \to T_{\max}$ (`0.75 -> 1.35`) could preserve full exploration early in `<think>` while nudging the model to conclude and `\boxed{}` cleanly before any deployment token ceiling (`2048` or `4096`).
 4. **Custom Metal / MLX GatedDeltaNet kernel**: Porting the 18 GatedDeltaNet recurrent layers to custom Metal / `mlx-lm` kernels on Apple Silicon to reach `300+ tok/s` for interactive 16k–32k math evaluation on consumer MacBooks.
