@@ -13,7 +13,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-os.environ.setdefault("MPLBACKEND", "Agg")
+if not os.environ.get("MPLBACKEND") or os.environ.get("MPLBACKEND", "").startswith("module://"):
+    os.environ["MPLBACKEND"] = "Agg"
 
 import pandas as pd
 import torch
@@ -227,6 +228,10 @@ class TestGpuExecutionPath(unittest.TestCase):
         self.assertEqual(normalize_gpu_tag("Tesla T4"), "t4")
         self.assertEqual(normalize_gpu_tag("NVIDIA A100-SXM4-40GB"), "a100")
         self.assertEqual(normalize_gpu_tag("NVIDIA GeForce RTX 4090"), "rtx4090")
+        self.assertEqual(
+            normalize_gpu_tag("NVIDIA RTX PRO 6000 Blackwell Server Edition"),
+            "rtx-pro-6000",
+        )
 
         self.assertIsNotNone(detect_nan_junk("", token_ids=[1, 2]))
         self.assertIsNotNone(detect_nan_junk("valid", token_ids=[]))
@@ -689,6 +694,7 @@ class TestGpuExecutionPath(unittest.TestCase):
         self.assertTrue(_is_safe_result_relpath("NOTES.md"))
         self.assertFalse(_is_safe_result_relpath("../secret.txt"))
         self.assertFalse(_is_safe_result_relpath("assets/budget_8192/model.safetensors"))
+        self.assertFalse(_is_safe_result_relpath("assets/sweep_results.csv"))
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -710,6 +716,94 @@ class TestGpuExecutionPath(unittest.TestCase):
         plan = run_on_gcp(project="valid-project-123", gpu="auto", dry_run=True)
         self.assertTrue(plan["dry_run"])
         self.assertEqual(plan["machine_type"], "g2-standard-4")
+
+    def test_colab_runner_helpers_and_dry_run(self) -> None:
+        import tarfile
+        from gpu.colab_run import (
+            build_colab_env,
+            build_colab_remote_driver,
+            build_colab_shell_script,
+            extract_tar_safely,
+            parse_gpu_candidates,
+            resolve_ordered_budgets,
+            run_on_colab,
+            session_exists,
+            validate_session_name,
+        )
+        from gpu.gcp_run import _BytesIO
+
+        self.assertEqual(validate_session_name("wsp-g4"), "wsp-g4")
+        with self.assertRaises(ValueError):
+            validate_session_name("../bad")
+
+        self.assertEqual(parse_gpu_candidates("g4", "l4,a100,t4"), ["G4", "L4", "A100", "T4"])
+        self.assertEqual(
+            resolve_ordered_budgets([8192, 16384], include_4k=True, include_32k=True),
+            [4096, 8192, 16384, 32768],
+        )
+
+        env = build_colab_env({"FOO": "bar"})
+        self.assertEqual(env["PYTHONUNBUFFERED"], "1")
+
+        # Orphan '[?] ...' CPU session must never match named session lookup
+        sample_sessions = [
+            "[?] m-s-usc1a10-2huy3qnedtjxn | Hardware: CPU | Shape: Standard | Variant: DEFAULT",
+            "wsp-g4 | m-s-usw2a1-abc | Hardware: G4 | Shape: Standard | Variant: DEFAULT",
+        ]
+        self.assertTrue(session_exists("wsp-g4", sample_sessions))
+        self.assertFalse(session_exists("wsp-l4", sample_sessions))
+        self.assertFalse(session_exists("m-s-usc1a10-2huy3qnedtjxn", sample_sessions))
+
+        shell_script = build_colab_shell_script(
+            budgets=[8192, 16384],
+            alphas=[0.0, 1.0, 1.25],
+            n_problems=50,
+            samples=1,
+            seed=0,
+            dtype="auto",
+            gpu_mem=0.85,
+            enforce_eager=False,
+            smoke_only=False,
+            include_4k=True,
+            include_32k=True,
+        )
+        self.assertIn("--torch-backend=auto", shell_script)
+        self.assertIn("/content/wsp/venv", shell_script)
+        self.assertIn("BUDGETS=(4096 8192 16384 32768)", shell_script)
+
+        driver_code = build_colab_remote_driver()
+        ast.parse(driver_code)
+
+        # Safe tar extraction filters out .safetensors and protected MPS root assets
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            arch = tmp_path / "wsp_out_summary.tar.gz"
+            with tarfile.open(arch, "w:gz") as tf:
+                for name, data in (
+                    ("assets/gpu_smoke_rtx-pro-6000.json", b"{}"),
+                    ("assets/sweep_results.csv", b"corrupt"),
+                    ("assets/budget_8192/model.safetensors", b"weights"),
+                ):
+                    info = tarfile.TarInfo(name=name)
+                    info.size = len(data)
+                    tf.addfile(info, fileobj=_BytesIO(data))
+            staging = tmp_path / "stage"
+            extract_tar_safely(arch, staging)
+            self.assertTrue((staging / "assets" / "gpu_smoke_rtx-pro-6000.json").is_file())
+            self.assertFalse((staging / "assets" / "sweep_results.csv").exists())
+            self.assertFalse((staging / "assets" / "budget_8192" / "model.safetensors").exists())
+
+        plan = run_on_colab(
+            gpu="G4",
+            include_4k=True,
+            include_32k=True,
+            dry_run=True,
+        )
+        self.assertTrue(plan["dry_run"])
+        self.assertEqual(plan["session_name"], "wsp-g4")
+        self.assertEqual(plan["gpu_candidates"], ["G4"])
+        self.assertEqual(plan["budgets"], [4096, 8192, 16384, 32768])
+        self.assertGreaterEqual(plan["exec_timeout_s"], 7200)
 
 
 if __name__ == "__main__":

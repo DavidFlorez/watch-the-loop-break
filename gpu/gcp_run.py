@@ -479,6 +479,7 @@ echo "=== [WSP GPU] Aggregating cross-budget results ==="
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 export PYTHONUNBUFFERED=1
+export MPLBACKEND=Agg
 
 cleanup_scratch() {{
   rm -rf /tmp/wsp_ckpt
@@ -504,6 +505,10 @@ fi
 
 VENV_DIR="/opt/wsp/venv"
 VENV_PY="$VENV_DIR/bin/python"
+export PATH="$VENV_DIR/bin:/usr/local/cuda/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+if [ -d /usr/local/cuda ]; then
+  export CUDA_HOME=/usr/local/cuda
+fi
 if [ ! -x "$VENV_PY" ]; then
   uv venv "$VENV_DIR" --python 3.11 || uv venv "$VENV_DIR" --python 3.10
 fi
@@ -511,6 +516,9 @@ fi
 echo "=== [WSP GPU] Installing vLLM + CUDA runtime inside isolated uv venv ==="
 if ! uv pip install --python "$VENV_PY" -r requirements-gpu.txt --torch-backend=auto; then
   uv pip install --python "$VENV_PY" -r requirements-gpu.txt
+fi
+if ! command -v nvcc >/dev/null 2>&1; then
+  export VLLM_USE_FLASHINFER_SAMPLER=0
 fi
 
 echo "=== [WSP GPU] Running smoke test on N=8 MATH-500 problems ==="
@@ -546,9 +554,26 @@ echo "=== [WSP GPU] Completed successfully at $(date -u +%Y-%m-%dT%H:%M:%SZ) ===
 """
 
 
+_PROTECTED_ROOT_ASSETS = frozenset(
+    {
+        "assets/alpha_token_distributions.png",
+        "assets/app_screenshot.png",
+        "assets/app_side_by_side.gif",
+        "assets/sweep_charts.png",
+        "assets/sweep_per_problem.csv",
+        "assets/sweep_per_problem.jsonl",
+        "assets/sweep_results.csv",
+        "assets/weight_diff_analysis.png",
+        "assets/weight_verification.json",
+    }
+)
+
+
 def _is_safe_result_relpath(rel_path: str) -> bool:
     """Validate relative artifact path copied back from remote VM."""
     if not rel_path or rel_path.startswith("/") or "\\" in rel_path:
+        return False
+    if rel_path in _PROTECTED_ROOT_ASSETS:
         return False
     p = Path(rel_path)
     if p.is_absolute() or ".." in p.parts:

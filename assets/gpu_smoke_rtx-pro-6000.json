@@ -1,0 +1,173 @@
+{
+  "timestamp_utc": "2026-11-04T20:33:19Z",
+  "gpu_tag": "rtx-pro-6000",
+  "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "compute_capability": 12.0,
+  "n_problems": 8,
+  "max_tokens": 1024,
+  "temperature": 0.0,
+  "seed": 0,
+  "prefix_check_tokens": 128,
+  "max_allowed_prompt_disagreements": 2,
+  "wall_time_s": 267.77,
+  "native_bfloat16": true,
+  "bf16_passed": true,
+  "fp16_passed": true,
+  "recommended_dtype": "bfloat16",
+  "failure_reasons": [],
+  "bf16_nan_failures": [],
+  "fp16_nan_failures": [],
+  "fp32_nan_failures": [],
+  "prompt_disagreements": 0,
+  "alpha0_prefix_disagreements": 0,
+  "alpha1_prefix_disagreements": 0,
+  "per_prompt": [
+    {
+      "unique_id": "test/algebra/2036.json",
+      "a0_match": true,
+      "a1_match": true,
+      "disagreed": false,
+      "a0_first_diff_idx": null,
+      "a1_first_diff_idx": null,
+      "bf16_a0_len": 1024,
+      "bf16_a1_len": 1024
+    },
+    {
+      "unique_id": "test/algebra/1098.json",
+      "a0_match": true,
+      "a1_match": true,
+      "disagreed": false,
+      "a0_first_diff_idx": null,
+      "a1_first_diff_idx": null,
+      "bf16_a0_len": 1024,
+      "bf16_a1_len": 1024
+    },
+    {
+      "unique_id": "test/geometry/967.json",
+      "a0_match": true,
+      "a1_match": true,
+      "disagreed": false,
+      "a0_first_diff_idx": null,
+      "a1_first_diff_idx": null,
+      "bf16_a0_len": 1024,
+      "bf16_a1_len": 1024
+    },
+    {
+      "unique_id": "test/prealgebra/1807.json",
+      "a0_match": true,
+      "a1_match": true,
+      "disagreed": false,
+      "a0_first_diff_idx": null,
+      "a1_first_diff_idx": null,
+      "bf16_a0_len": 1024,
+      "bf16_a1_len": 1024
+    },
+    {
+      "unique_id": "test/geometry/172.json",
+      "a0_match": true,
+      "a1_match": true,
+      "disagreed": false,
+      "a0_first_diff_idx": null,
+      "a1_first_diff_idx": null,
+      "bf16_a0_len": 1024,
+      "bf16_a1_len": 1024
+    },
+    {
+      "unique_id": "test/prealgebra/1458.json",
+      "a0_match": true,
+      "a1_match": true,
+      "disagreed": false,
+      "a0_first_diff_idx": null,
+      "a1_first_diff_idx": null,
+      "bf16_a0_len": 1024,
+      "bf16_a1_len": 1024
+    },
+    {
+      "unique_id": "test/geometry/1108.json",
+      "a0_match": true,
+      "a1_match": true,
+      "disagreed": false,
+      "a0_first_diff_idx": null,
+      "a1_first_diff_idx": null,
+      "bf16_a0_len": 1024,
+      "bf16_a1_len": 1024
+    },
+    {
+      "unique_id": "test/precalculus/145.json",
+      "a0_match": true,
+      "a1_match": true,
+      "disagreed": false,
+      "a0_first_diff_idx": null,
+      "a1_first_diff_idx": null,
+      "bf16_a0_len": 1024,
+      "bf16_a1_len": 1024
+    }
+  ],
+  "engine_meta": {
+    "alpha_0_bfloat16": {
+      "vllm_version": "0.33.0",
+      "model": "/content/tmp/smoke_a0_4091_c9e395",
+      "dtype": "bfloat16",
+      "max_model_len": 3072,
+      "gpu_memory_utilization": 0.85,
+      "seed": 0,
+      "enforce_eager": false,
+      "mamba_ssm_cache_dtype": "float32",
+      "language_model_only": true,
+      "limit_mm_per_prompt": null,
+      "fallbacks_triggered": []
+    },
+    "alpha_1_bfloat16": {
+      "vllm_version": "0.33.0",
+      "model": "/content/tmp/smoke_a1_4091_8e1e06",
+      "dtype": "bfloat16",
+      "max_model_len": 3072,
+      "gpu_memory_utilization": 0.85,
+      "seed": 0,
+      "enforce_eager": false,
+      "mamba_ssm_cache_dtype": "float32",
+      "language_model_only": true,
+      "limit_mm_per_prompt": null,
+      "fallbacks_triggered": []
+    }
+  },
+  "environment": {
+    "python_version": "3.12.3",
+    "python_full": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "platform": "Linux-6.6.159+-x86_64-with-glibc2.39",
+    "runtime": "colab",
+    "gpu_tag": "rtx-pro-6000",
+    "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "compute_capability": 12.0,
+    "native_bfloat16": true,
+    "nvidia_smi": {
+      "available": true,
+      "driver_version": "580.82.07",
+      "cuda_version": "13.0",
+      "gpu_count": 1,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "compute_capability": 12.0,
+      "memory_total_mib": 97887,
+      "gpus": [
+        {
+          "index": 0,
+          "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+          "driver_version": "580.82.07",
+          "compute_capability": 12.0,
+          "memory_total_mib": 97887,
+          "tag": "rtx-pro-6000"
+        }
+      ]
+    },
+    "pip_freeze_filtered": [],
+    "package_versions": {
+      "vllm": "0.33.0",
+      "torch": "2.14.0+cu132",
+      "transformers": "5.20.2",
+      "triton": "3.8.0",
+      "datasets": "5.1.0",
+      "math_verify": "installed",
+      "safetensors": "0.8.0"
+    }
+  }
+}

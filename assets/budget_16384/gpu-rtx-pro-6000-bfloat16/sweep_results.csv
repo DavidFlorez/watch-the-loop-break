@@ -1,0 +1,4 @@
+alpha,n_problems,n_samples,total_evaluations,correct,accuracy,accuracy_pct,accuracy_ci95_low,accuracy_ci95_high,hit_cap_count,hit_cap_pct,hit_cap_ci95_low,hit_cap_ci95_high,forced_correct,forced_accuracy,forced_accuracy_pct,forced_accuracy_ci95_low,forced_accuracy_ci95_high,mean_tokens,median_tokens,mean_forced_tokens,closed_think_pct,mean_rep_8gram_pct,mean_tail_rep_8gram_pct,wall_time_s,sec_per_problem,output_tok_per_s,backend,gpu,dtype,vllm_version
+0.0,50,1,50,3,0.06,6.0,2.06,16.22,47,94.0,83.78,97.94,12,0.24,24.0,14.3,37.41,15723.2,16384.0,454.9,6.0,55.52,83.49,127.96,2.56,6321.36,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,50,1,50,9,0.18,18.0,9.77,30.8,40,80.0,66.96,88.76,11,0.22,22.0,12.75,35.24,14727.7,16384.0,402.8,34.0,11.79,8.75,118.38,2.37,6390.64,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,50,1,50,14,0.28,28.0,17.47,41.67,32,64.0,50.14,75.86,15,0.3,30.0,19.1,43.75,13855.9,16384.0,322.1,38.0,8.3,2.73,109.12,2.18,6496.62,vllm,rtx-pro-6000,bfloat16,0.33.0

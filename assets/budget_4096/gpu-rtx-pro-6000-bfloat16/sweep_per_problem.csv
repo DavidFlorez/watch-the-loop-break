@@ -1,0 +1,151 @@
+alpha,max_new_tokens,unique_id,sample_idx,subject,level,gold,pred,correct,pred_strict,correct_strict,pred_forced,correct_forced,forced_tokens,n_tokens,hit_cap,finish_reason,closed_think,rep_8gram_ratio,tail_rep_8gram_ratio,wall_time_s,backend,gpu,dtype,vllm_version
+0.0,4096,test/intermediate_algebra/1994.json,0,Intermediate Algebra,5,p - q,,False,,False,,False,512,4096,True,length,False,0.005,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/2584.json,0,Algebra,3,\frac{14}{3},,False,,False,,False,512,4096,True,length,False,0.0618,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/1349.json,0,Algebra,2,\text{Evelyn},,False,,False,,False,512,4096,True,length,False,0.0532,0.0043,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/precalculus/927.json,0,Precalculus,4,90^\circ,,False,,False,,False,512,4096,True,length,False,0.014,0.0129,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/number_theory/1032.json,0,Number Theory,3,2220,,False,,False,,False,512,4096,True,length,False,0.0232,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/geometry/248.json,0,Geometry,2,5,,False,,False,,False,512,4096,True,length,False,0.027,0.0086,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/intermediate_algebra/134.json,0,Intermediate Algebra,1,-50,,False,,False,,False,512,4096,True,length,False,0.052,0.0386,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/geometry/434.json,0,Geometry,1,28,,False,,False,,False,512,4096,True,length,False,0.0332,0.0258,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/counting_and_probability/119.json,0,Counting & Probability,4,-125,,False,,False,,False,512,4096,True,length,False,0.0551,0.0815,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/number_theory/45.json,0,Number Theory,3,23,,False,,False,,False,512,4096,True,length,False,0.1082,0.0043,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/intermediate_algebra/1454.json,0,Intermediate Algebra,5,70 \sqrt{2},,False,,False,,False,512,4096,True,length,False,0.0738,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/intermediate_algebra/1247.json,0,Intermediate Algebra,3,-256,,False,,False,,False,512,4096,True,length,False,0.0412,0.0258,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/intermediate_algebra/1849.json,0,Intermediate Algebra,5,501,,False,,False,,False,512,4096,True,length,False,0.0046,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/893.json,0,Algebra,4,-1,,False,,False,,False,512,4096,True,length,False,0.0785,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/1332.json,0,Algebra,3,9,,False,,False,9,True,477,4096,True,length,False,0.1946,0.9399,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/661.json,0,Algebra,3,36,,False,,False,,False,512,4096,True,length,False,0.2529,0.1588,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/number_theory/753.json,0,Number Theory,4,13,,False,,False,,False,512,4096,True,length,False,0.7474,0.8155,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/number_theory/156.json,0,Number Theory,4,13,,False,,False,,False,512,4096,True,length,False,0.0258,0.0129,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/1519.json,0,Algebra,3,\frac{\sqrt{3}}{3},,False,,False,\frac{\sqrt{3}}{3},True,484,4096,True,length,False,0.0021,0.0086,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/2199.json,0,Algebra,1,7,,False,,False,,False,512,4096,True,length,False,0.1503,0.9657,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/number_theory/838.json,0,Number Theory,5,6,,False,,False,,False,512,4096,True,length,False,0.0257,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/counting_and_probability/389.json,0,Counting & Probability,2,28,,False,,False,,False,512,4096,True,length,False,0.0142,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/1578.json,0,Algebra,4,10,,False,,False,,False,512,4096,True,length,False,0.0624,0.0343,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/precalculus/441.json,0,Precalculus,2,30^\circ,,False,,False,,False,512,4096,True,length,False,0.0123,0.0386,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/prealgebra/153.json,0,Prealgebra,4,\frac 59,,False,,False,,False,512,4096,True,length,False,0.0384,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/counting_and_probability/1009.json,0,Counting & Probability,5,28,,False,,False,,False,512,4096,True,length,False,0.4992,0.9142,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/geometry/347.json,0,Geometry,3,76^\circ,,False,,False,,False,512,4096,True,length,False,0.0696,0.0644,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/prealgebra/1317.json,0,Prealgebra,1,4,,False,,False,4,True,374,4096,True,length,False,0.0214,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/geometry/483.json,0,Geometry,4,15,,False,,False,,False,512,4096,True,length,False,0.0346,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/geometry/826.json,0,Geometry,5,1\frac{4}{5},,False,,False,,False,512,4096,True,length,False,0.0097,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/prealgebra/260.json,0,Prealgebra,4,36^\circ,,False,,False,,False,512,4096,True,length,False,0.0496,0.0086,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/number_theory/631.json,0,Number Theory,5,36,,False,,False,,False,512,4096,True,length,False,0.3352,0.9485,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/precalculus/1201.json,0,Precalculus,3,11,,False,,False,,False,512,4096,True,length,False,0.0323,0.0129,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/geometry/1097.json,0,Geometry,4,63,,False,,False,,False,512,4096,True,length,False,0.0149,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/precalculus/695.json,0,Precalculus,2,"(-\infty, 0]",,False,,False,,False,512,4096,True,length,False,0.4158,0.9485,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/intermediate_algebra/2152.json,0,Intermediate Algebra,5,0,,False,,False,,False,512,4096,True,length,False,0.0408,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/1936.json,0,Algebra,3,-1,,False,,False,-1,True,404,4096,True,length,False,0.0652,0.03,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/intermediate_algebra/190.json,0,Intermediate Algebra,4,2,,False,,False,,False,512,4096,True,length,False,0.413,0.9614,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/intermediate_algebra/1566.json,0,Intermediate Algebra,3,2k,,False,,False,,False,512,4096,True,length,False,0.0204,0.0043,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/number_theory/686.json,0,Number Theory,2,4,,False,,False,,False,512,4096,True,length,False,0.0385,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/number_theory/109.json,0,Number Theory,4,4,,False,,False,,False,512,4096,True,length,False,0.0396,0.03,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/1303.json,0,Algebra,1,4,,False,,False,4,True,384,4096,True,length,False,0.0428,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/101.json,0,Algebra,4,"x \in [-2,7]",,False,,False,"[-2, 7]",True,472,4096,True,length,True,0.0225,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/prealgebra/2066.json,0,Prealgebra,5,22,,False,,False,48,False,297,4096,True,length,False,0.4923,0.8197,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/1960.json,0,Algebra,4,9,,False,,False,9,True,306,4096,True,length,False,0.04,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/precalculus/398.json,0,Precalculus,5,\begin{pmatrix} 1/5 \\ -18/5 \end{pmatrix},,False,,False,,False,512,4096,True,length,False,0.0654,0.0258,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/algebra/776.json,0,Algebra,5,-2,,False,,False,,False,512,4096,True,length,False,0.1062,0.0,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/precalculus/1202.json,0,Precalculus,5,27,,False,,False,,False,512,4096,True,length,False,0.0666,0.0086,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/intermediate_algebra/199.json,0,Intermediate Algebra,3,x^8 + x^7 + x^6 + x^5 + x^4 + x^3 + x^2 + x + 1,,False,,False,,False,512,4096,True,length,False,0.0706,0.0129,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+0.0,4096,test/number_theory/459.json,0,Number Theory,3,\frac{639}{40},,False,,False,,False,512,4096,True,length,False,0.0819,0.0386,0.557,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/intermediate_algebra/1994.json,0,Intermediate Algebra,5,p - q,,False,,False,,False,512,4096,True,length,False,0.0017,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/2584.json,0,Algebra,3,\frac{14}{3},,False,,False,,False,512,4096,True,length,False,0.0167,0.0343,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/1349.json,0,Algebra,2,\text{Evelyn},,False,,False,,False,512,4096,True,length,False,0.0169,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/precalculus/927.json,0,Precalculus,4,90^\circ,,False,,False,,False,512,4096,True,length,False,0.035,0.0129,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/number_theory/1032.json,0,Number Theory,3,2220,,False,,False,,False,512,4096,True,length,False,0.0293,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/geometry/248.json,0,Geometry,2,5,,False,,False,,False,512,4096,True,length,False,0.0037,0.0129,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/intermediate_algebra/134.json,0,Intermediate Algebra,1,-50,,False,,False,,False,512,4096,True,length,False,0.0517,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/geometry/434.json,0,Geometry,1,28,,False,,False,,False,512,4096,True,length,False,0.0134,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/counting_and_probability/119.json,0,Counting & Probability,4,-125,,False,,False,,False,512,4096,True,length,False,0.0105,0.0258,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/number_theory/45.json,0,Number Theory,3,23,,False,,False,,False,512,4096,True,length,False,0.0583,0.0086,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/intermediate_algebra/1454.json,0,Intermediate Algebra,5,70 \sqrt{2},,False,,False,,False,512,4096,True,length,False,0.0657,0.0258,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/intermediate_algebra/1247.json,0,Intermediate Algebra,3,-256,,False,,False,,False,512,4096,True,length,False,0.0224,0.0129,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/intermediate_algebra/1849.json,0,Intermediate Algebra,5,501,,False,,False,,False,512,4096,True,length,False,0.0022,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/893.json,0,Algebra,4,-1,,False,,False,,False,512,4096,True,length,False,0.0205,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/1332.json,0,Algebra,3,9,,False,,False,,False,512,4096,True,length,False,0.0199,0.03,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/661.json,0,Algebra,3,36,,False,,False,,False,512,4096,True,length,False,0.085,0.0386,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/number_theory/753.json,0,Number Theory,4,13,,False,,False,,False,512,4096,True,length,False,0.0295,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/number_theory/156.json,0,Number Theory,4,13,,False,,False,,False,512,4096,True,length,False,0.0091,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/1519.json,0,Algebra,3,\frac{\sqrt{3}}{3},,False,,False,,False,512,4096,True,length,False,0.0058,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/2199.json,0,Algebra,1,7,,False,,False,,False,512,4096,True,length,False,0.0206,0.0043,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/number_theory/838.json,0,Number Theory,5,6,,False,,False,,False,512,4096,True,length,False,0.0355,0.0043,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/counting_and_probability/389.json,0,Counting & Probability,2,28,28,True,28,True,28,True,0,3844,False,stop,True,0.005,0.0,0.387,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/1578.json,0,Algebra,4,10,,False,,False,,False,512,4096,True,length,False,0.0717,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/precalculus/441.json,0,Precalculus,2,30^\circ,,False,,False,30,True,425,4096,True,length,False,0.0178,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/prealgebra/153.json,0,Prealgebra,4,\frac 59,,False,,False,,False,512,4096,True,length,False,0.008,0.0043,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/counting_and_probability/1009.json,0,Counting & Probability,5,28,,False,,False,,False,512,4096,True,length,False,0.019,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/geometry/347.json,0,Geometry,3,76^\circ,,False,,False,,False,512,4096,True,length,False,0.0119,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/prealgebra/1317.json,0,Prealgebra,1,4,4,True,4,True,4,True,0,1783,False,stop,True,0.0129,0.0086,0.387,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/geometry/483.json,0,Geometry,4,15,,False,,False,,False,512,4096,True,length,False,0.03,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/geometry/826.json,0,Geometry,5,1\frac{4}{5},,False,,False,,False,512,4096,True,length,False,0.0033,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/prealgebra/260.json,0,Prealgebra,4,36^\circ,,False,,False,,False,512,4096,True,length,False,0.0121,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/number_theory/631.json,0,Number Theory,5,36,,False,,False,,False,512,4096,True,length,False,0.0131,0.0129,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/precalculus/1201.json,0,Precalculus,3,11,,False,,False,,False,512,4096,True,length,False,0.0293,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/geometry/1097.json,0,Geometry,4,63,,False,,False,,False,512,4096,True,length,False,0.01,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/precalculus/695.json,0,Precalculus,2,"(-\infty, 0]",,False,,False,,False,512,4096,True,length,False,0.0125,0.0043,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/intermediate_algebra/2152.json,0,Intermediate Algebra,5,0,,False,,False,,False,512,4096,True,length,False,0.0143,0.0086,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/1936.json,0,Algebra,3,-1,-1,True,-1,True,-1,True,0,1905,False,stop,True,0.0099,0.0,0.387,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/intermediate_algebra/190.json,0,Intermediate Algebra,4,2,,False,,False,,False,512,4096,True,length,False,0.0062,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/intermediate_algebra/1566.json,0,Intermediate Algebra,3,2k,,False,,False,,False,512,4096,True,length,False,0.0074,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/number_theory/686.json,0,Number Theory,2,4,,False,,False,,False,512,4096,True,length,False,0.0887,0.0343,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/number_theory/109.json,0,Number Theory,4,4,,False,,False,,False,512,4096,True,length,False,0.0292,0.0129,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/1303.json,0,Algebra,1,4,,False,,False,4,True,355,4096,True,length,False,0.0262,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/101.json,0,Algebra,4,"x \in [-2,7]",,False,,False,,False,512,4096,True,length,False,0.0731,0.0429,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/prealgebra/2066.json,0,Prealgebra,5,22,,False,,False,,False,512,4096,True,length,False,0.0753,0.03,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/1960.json,0,Algebra,4,9,,False,,False,9,True,295,4096,True,length,False,0.0154,0.03,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/precalculus/398.json,0,Precalculus,5,\begin{pmatrix} 1/5 \\ -18/5 \end{pmatrix},,False,,False,,False,512,4096,True,length,False,0.0523,0.0429,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/algebra/776.json,0,Algebra,5,-2,,False,,False,,False,512,4096,True,length,False,0.0604,0.0043,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/precalculus/1202.json,0,Precalculus,5,27,,False,,False,,False,512,4096,True,length,False,0.0378,0.0343,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/intermediate_algebra/199.json,0,Intermediate Algebra,3,x^8 + x^7 + x^6 + x^5 + x^4 + x^3 + x^2 + x + 1,,False,,False,,False,512,4096,True,length,False,0.0085,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.0,4096,test/number_theory/459.json,0,Number Theory,3,\frac{639}{40},,False,,False,,False,512,4096,True,length,False,0.0233,0.0,0.468,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/intermediate_algebra/1994.json,0,Intermediate Algebra,5,p - q,,False,,False,,False,512,4096,True,length,False,0.0158,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/2584.json,0,Algebra,3,\frac{14}{3},,False,,False,,False,512,4096,True,length,False,0.0242,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/1349.json,0,Algebra,2,\text{Evelyn},,False,,False,,False,512,4096,True,length,False,0.0197,0.0043,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/precalculus/927.json,0,Precalculus,4,90^\circ,,False,,False,,False,512,4096,True,length,False,0.0265,0.0172,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/number_theory/1032.json,0,Number Theory,3,2220,,False,,False,,False,512,4096,True,length,False,0.0081,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/geometry/248.json,0,Geometry,2,5,,False,,False,,False,512,4096,True,length,False,0.02,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/intermediate_algebra/134.json,0,Intermediate Algebra,1,-50,,False,,False,,False,512,4096,True,length,False,0.0213,0.0043,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/geometry/434.json,0,Geometry,1,28,,False,,False,,False,512,4096,True,length,False,0.0106,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/counting_and_probability/119.json,0,Counting & Probability,4,-125,,False,,False,,False,512,4096,True,length,False,0.0117,0.0172,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/number_theory/45.json,0,Number Theory,3,23,,False,,False,,False,512,4096,True,length,False,0.0821,0.0172,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/intermediate_algebra/1454.json,0,Intermediate Algebra,5,70 \sqrt{2},,False,,False,,False,512,4096,True,length,False,0.0636,0.0043,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/intermediate_algebra/1247.json,0,Intermediate Algebra,3,-256,,False,,False,,False,512,4096,True,length,False,0.0342,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/intermediate_algebra/1849.json,0,Intermediate Algebra,5,501,,False,,False,,False,512,4096,True,length,False,0.0126,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/893.json,0,Algebra,4,-1,,False,,False,,False,512,4096,True,length,False,0.0317,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/1332.json,0,Algebra,3,9,,False,,False,,False,512,4096,True,length,False,0.0094,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/661.json,0,Algebra,3,36,,False,,False,,False,512,4096,True,length,False,0.0285,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/number_theory/753.json,0,Number Theory,4,13,,False,,False,,False,512,4096,True,length,False,0.0652,0.0086,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/number_theory/156.json,0,Number Theory,4,13,,False,,False,,False,512,4096,True,length,False,0.0219,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/1519.json,0,Algebra,3,\frac{\sqrt{3}}{3},,False,,False,\frac{\sqrt{3}}{3},True,458,4096,True,length,False,0.0016,0.0086,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/2199.json,0,Algebra,1,7,,False,,False,,False,512,4096,True,length,False,0.0063,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/number_theory/838.json,0,Number Theory,5,6,,False,,False,,False,512,4096,True,length,False,0.0097,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/counting_and_probability/389.json,0,Counting & Probability,2,28,,False,,False,,False,512,4096,True,length,False,0.0017,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/1578.json,0,Algebra,4,10,,False,,False,,False,512,4096,True,length,False,0.0354,0.0043,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/precalculus/441.json,0,Precalculus,2,30^\circ,,False,,False,,False,512,4096,True,length,False,0.0551,0.0086,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/prealgebra/153.json,0,Prealgebra,4,\frac 59,0.\overline{7}-0.\overline{4}+0.\overline{2},False,0.\overline{7}-0.\overline{4}+0.\overline{2},False,,False,512,4096,True,length,False,0.002,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/counting_and_probability/1009.json,0,Counting & Probability,5,28,,False,,False,,False,512,4096,True,length,False,0.0211,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/geometry/347.json,0,Geometry,3,76^\circ,,False,,False,,False,512,4096,True,length,False,0.033,0.0043,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/prealgebra/1317.json,0,Prealgebra,1,4,4,True,4,True,4,True,0,1816,False,stop,True,0.0037,0.0,0.384,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/geometry/483.json,0,Geometry,4,15,,False,,False,,False,512,4096,True,length,False,0.0026,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/geometry/826.json,0,Geometry,5,1\frac{4}{5},,False,,False,,False,512,4096,True,length,False,0.0107,0.0172,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/prealgebra/260.json,0,Prealgebra,4,36^\circ,,False,,False,,False,512,4096,True,length,False,0.0201,0.0129,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/number_theory/631.json,0,Number Theory,5,36,,False,,False,,False,512,4096,True,length,False,0.0678,0.0687,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/precalculus/1201.json,0,Precalculus,3,11,,False,,False,,False,512,4096,True,length,False,0.052,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/geometry/1097.json,0,Geometry,4,63,,False,,False,,False,512,4096,True,length,False,0.016,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/precalculus/695.json,0,Precalculus,2,"(-\infty, 0]",,False,,False,,False,512,4096,True,length,False,0.006,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/intermediate_algebra/2152.json,0,Intermediate Algebra,5,0,,False,,False,,False,512,4096,True,length,False,0.0041,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/1936.json,0,Algebra,3,-1,-1,True,-1,True,-1,True,0,3194,False,stop,True,0.0129,0.0,0.384,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/intermediate_algebra/190.json,0,Intermediate Algebra,4,2,,False,,False,,False,512,4096,True,length,False,0.0503,0.0172,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/intermediate_algebra/1566.json,0,Intermediate Algebra,3,2k,,False,,False,,False,512,4096,True,length,False,0.0126,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/number_theory/686.json,0,Number Theory,2,4,,False,,False,,False,512,4096,True,length,False,0.0296,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/number_theory/109.json,0,Number Theory,4,4,,False,,False,,False,512,4096,True,length,False,0.0152,0.0129,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/1303.json,0,Algebra,1,4,4,True,4,True,4,True,0,1811,False,stop,True,0.0183,0.0172,0.384,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/101.json,0,Algebra,4,"x \in [-2,7]",,False,,False,,False,512,4096,True,length,False,0.0355,0.0043,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/prealgebra/2066.json,0,Prealgebra,5,22,,False,,False,,False,512,4096,True,length,False,0.02,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/1960.json,0,Algebra,4,9,,False,,False,9,True,493,4096,True,length,False,0.003,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/precalculus/398.json,0,Precalculus,5,\begin{pmatrix} 1/5 \\ -18/5 \end{pmatrix},,False,,False,,False,512,4096,True,length,False,0.0216,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/algebra/776.json,0,Algebra,5,-2,,False,,False,,False,512,4096,True,length,False,0.0887,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/precalculus/1202.json,0,Precalculus,5,27,,False,,False,,False,512,4096,True,length,False,0.0158,0.0129,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/intermediate_algebra/199.json,0,Intermediate Algebra,3,x^8 + x^7 + x^6 + x^5 + x^4 + x^3 + x^2 + x + 1,,False,,False,,False,512,4096,True,length,False,0.0289,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0
+1.25,4096,test/number_theory/459.json,0,Number Theory,3,\frac{639}{40},,False,,False,,False,512,4096,True,length,False,0.0166,0.0,0.465,vllm,rtx-pro-6000,bfloat16,0.33.0

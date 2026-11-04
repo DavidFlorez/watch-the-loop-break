@@ -1,0 +1,140 @@
+{
+  "updated_at_utc": "2026-11-04T20:43:14Z",
+  "backend": "vllm",
+  "model_base": "Qwen/Qwen3.5-0.8B",
+  "model_edit": "RikiyaT/Qwen3.5-0.8B-weight-space-programming",
+  "target_tensors": [
+    "model.language_model.layers.15.mlp.down_proj.weight",
+    "model.language_model.layers.19.mlp.down_proj.weight"
+  ],
+  "budget": 8192,
+  "n_problems": 50,
+  "samples": 1,
+  "seed": 0,
+  "gpu_tag": "rtx-pro-6000",
+  "dtype": "bfloat16",
+  "vllm_version": "0.33.0",
+  "sampling_pass1": {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "presence_penalty": 1.5,
+    "n": 1,
+    "max_tokens": 8192,
+    "seed": 0,
+    "stop_token_ids": [
+      248046,
+      248044
+    ],
+    "enable_thinking": true
+  },
+  "sampling_pass2_forced": {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "presence_penalty": 1.5,
+    "n": 1,
+    "max_tokens": 512,
+    "seed": 0,
+    "stop_token_ids": [
+      248046,
+      248044
+    ],
+    "force_suffix": "\n\nConsidering the limited time, I have to give the solution based on the thinking directly now.\n</think>\n\n"
+  },
+  "engine_config": {
+    "vllm_version": "0.33.0",
+    "dtype": "bfloat16",
+    "max_model_len": 10240,
+    "gpu_memory_utilization": 0.85,
+    "seed": 0,
+    "enforce_eager": false,
+    "mamba_ssm_cache_dtype": "float32",
+    "language_model_only": true,
+    "limit_mm_per_prompt": null,
+    "fallbacks_triggered": []
+  },
+  "alpha_stats": {
+    "0": {
+      "alpha": 0.0,
+      "n_generated_samples": 50,
+      "n_capped_forced": 47,
+      "pass1_wall_s": 49.0,
+      "pass2_wall_s": 5.87,
+      "total_wall_s": 54.87,
+      "pass1_output_tokens": 401135,
+      "pass2_output_tokens": 23282,
+      "total_output_tokens": 424417,
+      "output_tok_per_s": 7734.96,
+      "updated_at_utc": "2026-11-04T20:39:42Z"
+    },
+    "1": {
+      "alpha": 1.0,
+      "n_generated_samples": 50,
+      "n_capped_forced": 45,
+      "pass1_wall_s": 44.02,
+      "pass2_wall_s": 5.68,
+      "total_wall_s": 49.7,
+      "pass1_output_tokens": 388987,
+      "pass2_output_tokens": 22647,
+      "total_output_tokens": 411634,
+      "output_tok_per_s": 8282.37,
+      "updated_at_utc": "2026-11-04T20:41:28Z"
+    },
+    "1.25": {
+      "alpha": 1.25,
+      "n_generated_samples": 50,
+      "n_capped_forced": 43,
+      "pass1_wall_s": 44.04,
+      "pass2_wall_s": 5.52,
+      "total_wall_s": 49.56,
+      "pass1_output_tokens": 386662,
+      "pass2_output_tokens": 21759,
+      "total_output_tokens": 408421,
+      "output_tok_per_s": 8240.94,
+      "updated_at_utc": "2026-11-04T20:43:13Z"
+    }
+  },
+  "aggregate_wall_time_s": 154.13,
+  "aggregate_output_tokens": 1244472,
+  "aggregate_output_tok_per_s": 8074.17,
+  "environment": {
+    "python_version": "3.12.3",
+    "python_full": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "platform": "Linux-6.6.159+-x86_64-with-glibc2.39",
+    "runtime": "colab",
+    "gpu_tag": "rtx-pro-6000",
+    "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "compute_capability": 12.0,
+    "native_bfloat16": true,
+    "nvidia_smi": {
+      "available": true,
+      "driver_version": "580.82.07",
+      "cuda_version": "13.0",
+      "gpu_count": 1,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "compute_capability": 12.0,
+      "memory_total_mib": 97887,
+      "gpus": [
+        {
+          "index": 0,
+          "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+          "driver_version": "580.82.07",
+          "compute_capability": 12.0,
+          "memory_total_mib": 97887,
+          "tag": "rtx-pro-6000"
+        }
+      ]
+    },
+    "pip_freeze_filtered": [],
+    "package_versions": {
+      "vllm": "0.33.0",
+      "torch": "2.14.0+cu132",
+      "transformers": "5.20.2",
+      "triton": "3.8.0",
+      "datasets": "5.1.0",
+      "math_verify": "installed",
+      "safetensors": "0.8.0"
+    }
+  }
+}

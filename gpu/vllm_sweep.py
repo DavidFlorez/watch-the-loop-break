@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 
-os.environ.setdefault("MPLBACKEND", "Agg")
+if not os.environ.get("MPLBACKEND") or os.environ.get("MPLBACKEND", "").startswith("module://"):
+    os.environ["MPLBACKEND"] = "Agg"
 
 import argparse
 import gzip

@@ -147,6 +147,9 @@ def normalize_gpu_tag(gpu_name: str) -> str:
         if re.search(rf"\b{known}\b", raw) or known in raw:
             return known
 
+    if re.search(r"\brtx\s+pro\s+6000\b", raw):
+        return "rtx-pro-6000"
+
     rtx_match = re.search(r"rtx\s*[-_]?\s*(\d{4}(?:\s*ti|\s*super)?)", raw)
     if rtx_match:
         return "rtx" + re.sub(r"\s+", "", rtx_match.group(1))
@@ -306,21 +309,39 @@ def check_min_compute_capability(min_cc: float = 7.5, require_gpu: bool = True) 
 
 
 def get_pip_freeze_filtered() -> List[str]:
-    """Run `pip freeze` and filter lines matching `vllm|torch|transformers|triton`."""
+    """Return frozen package lines matching `vllm|torch|transformers|triton` (with uv/importlib fallback)."""
     pattern = re.compile(r"vllm|torch|transformers|triton", re.IGNORECASE)
+    for cmd in (
+        [sys.executable, "-m", "pip", "freeze"],
+        ["uv", "pip", "freeze", "--python", sys.executable],
+    ):
+        try:
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                matched = [line.strip() for line in res.stdout.splitlines() if pattern.search(line)]
+                if matched:
+                    return matched
+        except Exception:
+            continue
+
     try:
-        res = subprocess.run(
-            [sys.executable, "-m", "pip", "freeze"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
-        if res.returncode == 0:
-            return [line.strip() for line in res.stdout.splitlines() if pattern.search(line)]
+        from importlib import metadata as importlib_metadata
+
+        dists = []
+        for dist in importlib_metadata.distributions():
+            name = (dist.metadata.get("Name") or "").strip()
+            ver = (dist.version or "").strip()
+            if name and ver and pattern.search(name):
+                dists.append(f"{name}=={ver}")
+        return sorted(set(dists), key=str.lower)
     except Exception:
-        pass
-    return []
+        return []
 
 
 def collect_environment_metadata(gpu_tag_override: Optional[str] = None) -> Dict[str, Any]:
@@ -445,6 +466,18 @@ def create_vllm_engine(
     2. If `torch.compile` / Inductor fails while `enforce_eager=False`, retries with
        `enforce_eager=True` and logs the fallback.
     """
+    bin_dir = str(Path(sys.executable).resolve().parent)
+    path_parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    if Path("/usr/local/cuda/bin").is_dir() and "/usr/local/cuda/bin" not in path_parts:
+        path_parts.insert(0, "/usr/local/cuda/bin")
+    if bin_dir and bin_dir not in path_parts:
+        path_parts.insert(0, bin_dir)
+    os.environ["PATH"] = os.pathsep.join(path_parts)
+    if not os.environ.get("CUDA_HOME") and Path("/usr/local/cuda").is_dir():
+        os.environ["CUDA_HOME"] = "/usr/local/cuda"
+    if not os.environ.get("VLLM_USE_FLASHINFER_SAMPLER") and shutil.which("nvcc") is None:
+        os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+
     if llm_cls is None:
         from vllm import LLM as _VllmLLM
 

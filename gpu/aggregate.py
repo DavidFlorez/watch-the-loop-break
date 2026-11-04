@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 
-os.environ.setdefault("MPLBACKEND", "Agg")
+if not os.environ.get("MPLBACKEND") or os.environ.get("MPLBACKEND", "").startswith("module://"):
+    os.environ["MPLBACKEND"] = "Agg"
 
 import argparse
 import datetime as dt
@@ -348,13 +349,17 @@ def update_notes_with_gpu_results(
 
     if meta_records:
         m0 = meta_records[-1]
-        smi = m0.get("environment", {}).get("nvidia_smi", {})
-        freezes = m0.get("environment", {}).get("pip_freeze_filtered", [])
+        env_meta = m0.get("environment", {})
+        smi = env_meta.get("nvidia_smi", {})
+        freezes = [x for x in env_meta.get("pip_freeze_filtered", []) if x]
+        if not freezes:
+            pkg_vers = env_meta.get("package_versions", {})
+            freezes = [f"{k}=={v}" for k, v in pkg_vers.items() if v]
         lines.append(
             f"- **GPU Runtime Environment**: `{smi.get('gpu_name', gpu_labels[0])}` | "
             f"Driver `{smi.get('driver_version', 'n/a')}` | CUDA `{smi.get('cuda_version', 'n/a')}` | "
-            f"Python `{m0.get('environment', {}).get('python_version', 'n/a')}` | "
-            f"Packages: `{', '.join(freezes[:5])}`."
+            f"Python `{env_meta.get('python_version', 'n/a')}` | "
+            f"Packages: `{', '.join(freezes[:6])}`."
         )
 
     lines.extend(
