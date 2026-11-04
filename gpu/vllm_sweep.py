@@ -11,6 +11,7 @@ import argparse
 import gzip
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -24,6 +25,7 @@ import pandas as pd
 
 from gpu.common import (
     FORCE_ANSWER_SUFFIX,
+    FORCE_BOX_OPEN_SUFFIX,
     FORCED_MAX_TOKENS,
     SAMPLING_DEFAULTS,
     STOP_TOKEN_IDS,
@@ -43,6 +45,8 @@ from gpu.common import (
 from gpu.make_ckpt import build_checkpoint
 from metrics import (
     build_math_prompt,
+    compute_loop_onset_token,
+    extract_forced_boxed,
     extract_last_boxed,
     extract_last_boxed_strict,
     grade_math_answer,
@@ -54,6 +58,18 @@ from sweep import load_math500_subset, save_sweep_charts
 from weights import BASE_MODEL_ID, EDIT_MODEL_ID, TARGET_TENSORS
 
 ResumeKey = Tuple[float, str, int, int]
+
+
+def _safe_compute_loop_onset(
+    text: str,
+    tokenizer: Any,
+    token_ids: Optional[Sequence[int]] = None,
+) -> Optional[int]:
+    """Compute `loop_onset_token` safely even if a unit-test mock tokenizer lacks `.decode`."""
+    try:
+        return compute_loop_onset_token(text, tokenizer, token_ids=token_ids)
+    except Exception:
+        return None
 
 
 def _record_key(rec: Dict[str, Any]) -> ResumeKey:
@@ -191,6 +207,7 @@ def build_summary_dataframe(
         n_closed_think = sum(
             1 for r in a_recs if bool(r.get("closed_think", "</think>" in str(r.get("text", ""))))
         )
+        n_looped = sum(1 for r in a_recs if r.get("loop_onset_token") is not None)
 
         acc_strict_frac = n_strict_corr / max(1, n_evals)
         acc_forced_frac = n_forced_corr / max(1, n_evals)
@@ -232,6 +249,7 @@ def build_summary_dataframe(
                 "median_tokens": round(med_toks, 1),
                 "mean_forced_tokens": round(m_forced_toks, 1),
                 "closed_think_pct": round((n_closed_think / max(1, n_evals)) * 100.0, 2),
+                "looped_pct": round((n_looped / max(1, n_evals)) * 100.0, 2),
                 "mean_rep_8gram_pct": round(m_rep8, 2),
                 "mean_tail_rep_8gram_pct": round(m_tail_rep8, 2),
                 "wall_time_s": round(wall_s, 2),
@@ -249,6 +267,19 @@ def build_summary_dataframe(
     return pd.DataFrame(summary_rows).sort_values("alpha").reset_index(drop=True)
 
 
+def _format_prompt_for_problem(tokenizer: Any, problem_text: str) -> str:
+    formatted = tokenizer.apply_chat_template(
+        [{"role": "user", "content": build_math_prompt(problem_text)}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+    assert formatted.endswith("<think>\n"), (
+        f"Prompt must end with '<think>\\n', got {formatted[-40:]!r}"
+    )
+    return formatted
+
+
 def run_vllm_alpha(
     *,
     alpha: float,
@@ -263,6 +294,10 @@ def run_vllm_alpha(
     gpu_mem: float = 0.85,
     ckpt_dir: Optional[str] = None,
     keep_ckpt: bool = False,
+    seed_jsonl: Optional[str] = None,
+    reforce_closed_capped: bool = True,
+    chunk_size: int = 50,
+    progress_interval_s: float = 300.0,
     llm_cls: Optional[Any] = None,
     sampling_params_factory: Optional[Any] = None,
     tokenizer_override: Optional[Any] = None,
@@ -284,11 +319,52 @@ def run_vllm_alpha(
     meta_path = out_dir / "meta.json"
 
     problems = load_math500_subset(n=n_problems, seed=seed)
-    problem_rank = {p["unique_id"]: idx for idx, p in enumerate(problems)}
+    problem_by_uid = {str(p["unique_id"]): p for p in problems}
+    problem_rank = {str(p["unique_id"]): idx for idx, p in enumerate(problems)}
 
-    # Check if all samples for this alpha & budget are already complete before touching weights or GPU
+    # Check if all samples for this alpha & budget are already complete (optionally importing `--seed-jsonl`)
+    seeded_count = 0
     with file_lock(lock_path):
         existing = _load_existing_records(jsonl_gz_path)
+        if seed_jsonl:
+            seed_path = Path(seed_jsonl)
+            if seed_path.is_file():
+                seed_records = _load_existing_records(seed_path)
+                for key, s_rec in seed_records.items():
+                    if (
+                        key[0] == alpha_f
+                        and key[1] in problem_by_uid
+                        and int(key[2]) < int(samples)
+                        and key[3] == int(budget)
+                        and key not in existing
+                    ):
+                        copied = dict(s_rec)
+                        copied["gpu"] = resolved_gpu
+                        copied["dtype"] = resolved_dtype
+                        existing[key] = copied
+                        seeded_count += 1
+                if seeded_count > 0:
+                    atomic_write_gzip_jsonl(jsonl_gz_path, list(existing.values()))
+                    print(
+                        f"[vLLM Sweep] Seeded {seeded_count} cached record(s) from {seed_path} -> {jsonl_gz_path}",
+                        flush=True,
+                    )
+
+    # Identify closed-</think> capped records imported from legacy runs that need Pass-2 open_box re-forcing
+    reforce_keys: List[ResumeKey] = []
+    if reforce_closed_capped:
+        for p in problems:
+            uid = str(p["unique_id"])
+            for s_idx in range(int(samples)):
+                key = (alpha_f, uid, s_idx, int(budget))
+                rec = existing.get(key)
+                if (
+                    rec is not None
+                    and bool(rec.get("hit_cap"))
+                    and bool(rec.get("closed_think", "</think>" in str(rec.get("text", ""))))
+                    and rec.get("forced_mode") != "open_box"
+                ):
+                    reforce_keys.append(key)
 
     pending_problems: List[Dict[str, Any]] = []
     missing_sample_indices_by_uid: Dict[str, List[int]] = {}
@@ -308,9 +384,30 @@ def run_vllm_alpha(
     alpha_run_meta: Optional[Dict[str, Any]] = None
     engine_meta: Optional[Dict[str, Any]] = None
     llm = None
+    tokenizer: Any = tokenizer_override
+
+    def _get_tokenizer() -> Any:
+        nonlocal tokenizer
+        if tokenizer is None:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
+        return tokenizer
+
+    # Backfill `out_ids` / `forced_text` / `loop_onset_token` if missing on existing records
+    backfill_needed = any(
+        (key[0] == alpha_f and key[1] in problem_by_uid and key[3] == int(budget))
+        and (
+            "out_ids" not in rec
+            or "loop_onset_token" not in rec
+            or "forced_text" not in rec
+        )
+        for key, rec in existing.items()
+    )
 
     try:
-        if pending_problems:
+        need_engine = bool(pending_problems or reforce_keys)
+        if need_engine:
             if ckpt_dir is not None:
                 ckpt_path = Path(ckpt_dir).resolve()
                 if not ckpt_path.is_dir():
@@ -321,32 +418,16 @@ def run_vllm_alpha(
                 print(f"[vLLM Sweep] Building scratch checkpoint for alpha={alpha_f:g} -> {ckpt_path}", flush=True)
                 build_checkpoint(alpha=alpha_f, out_dir=ckpt_path)
 
-            if tokenizer_override is not None:
-                tokenizer = tokenizer_override
-            else:
+            if tokenizer is None:
                 from transformers import AutoTokenizer
 
                 tokenizer = AutoTokenizer.from_pretrained(str(ckpt_path))
 
-            prompts_str: List[str] = []
-            prompt_ids_list: List[List[int]] = []
-            for p in pending_problems:
-                formatted = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": build_math_prompt(p["problem"])}],
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=True,
-                )
-                assert formatted.endswith("<think>\n"), (
-                    f"Prompt must end with '<think>\\n', got {formatted[-40:]!r}"
-                )
-                prompts_str.append(formatted)
-                prompt_ids_list.append(list(tokenizer.encode(formatted, add_special_tokens=False)))
-
             max_model_len = int(budget) + 2048
             print(
                 f"[vLLM Sweep] Initializing engine | alpha={alpha_f:g} | budget={budget} | "
-                f"N={len(pending_problems)}x{samples} | dtype={resolved_dtype} | gpu={resolved_gpu}",
+                f"pending={len(pending_problems)}x{samples} | reforce={len(reforce_keys)} | "
+                f"dtype={resolved_dtype} | gpu={resolved_gpu}",
                 flush=True,
             )
             llm, engine_meta = create_vllm_engine(
@@ -360,7 +441,9 @@ def run_vllm_alpha(
             )
             vllm_version = engine_meta["vllm_version"]
 
-            # Pass 1: Normal generation with presence_penalty=1.5, temperature=0.6, top_p=0.95, top_k=20
+            force_close_suffix_ids = list(tokenizer.encode(FORCE_ANSWER_SUFFIX, add_special_tokens=False))
+            force_box_suffix_ids = list(tokenizer.encode(FORCE_BOX_OPEN_SUFFIX, add_special_tokens=False))
+
             sp_pass1 = (
                 sampling_params_factory(
                     n=int(samples),
@@ -371,162 +454,329 @@ def run_vllm_alpha(
                 if sampling_params_factory is not None
                 else _make_sampling_params(n=int(samples), max_tokens=int(budget), seed=int(seed))
             )
-
-            t0_p1 = time.perf_counter()
-            outputs_p1 = llm.generate(prompts_str, sp_pass1)
-            pass1_wall_s = time.perf_counter() - t0_p1
-
-            staged_items: List[Dict[str, Any]] = []
-            capped_indices: List[int] = []
-            pass1_out_tokens = 0
-
-            for p, p_ids, req_out in zip(pending_problems, prompt_ids_list, outputs_p1):
-                uid = str(p["unique_id"])
-                needed_samples = set(missing_sample_indices_by_uid[uid])
-                for s_idx, comp in enumerate(req_out.outputs):
-                    if s_idx not in needed_samples:
-                        continue
-                    out_ids = list(comp.token_ids)
-                    n_toks = len(out_ids)
-                    pass1_out_tokens += n_toks
-                    finish_reason = str(getattr(comp, "finish_reason", "stop"))
-                    hit_cap = finish_reason == "length"
-                    text = (
-                        comp.text
-                        if getattr(comp, "text", None) is not None
-                        else tokenizer.decode(out_ids, skip_special_tokens=False)
-                    )
-                    closed_think = "</think>" in text
-                    pred = extract_last_boxed(text)
-                    corr = bool(grade_math_answer(pred, p["answer"]))
-                    pred_strict = extract_last_boxed_strict(text)
-                    corr_strict = bool(grade_math_answer(pred_strict, p["answer"]))
-                    rep8 = round(repeated_8gram_ratio(text), 4)
-                    tail_rep8 = round(tail_repeated_8gram_ratio(text), 4)
-
-                    item_dict = {
-                        "problem": p,
-                        "prompt_ids": p_ids,
-                        "sample_idx": int(s_idx),
-                        "out_ids": out_ids,
-                        "n_tokens": n_toks,
-                        "finish_reason": finish_reason,
-                        "hit_cap": hit_cap,
-                        "text": text,
-                        "closed_think": closed_think,
-                        "pred": pred,
-                        "correct": corr,
-                        "pred_strict": pred_strict,
-                        "correct_strict": corr_strict,
-                    }
-                    staged_idx = len(staged_items)
-                    staged_items.append(item_dict)
-                    if hit_cap:
-                        capped_indices.append(staged_idx)
-
-            per_p1_wall = pass1_wall_s / max(1, len(staged_items))
-
-            # Pass 2: Forced-answer pass on the same LLM & alpha for every sample that hit `budget`
-            pass2_wall_s = 0.0
-            pass2_out_tokens = 0
-            if capped_indices:
-                force_suffix_ids = list(tokenizer.encode(FORCE_ANSWER_SUFFIX, add_special_tokens=False))
-                forced_inputs: List[Any] = []
-                for idx_s in capped_indices:
-                    it = staged_items[idx_s]
-                    combined_ids = it["prompt_ids"] + it["out_ids"] + force_suffix_ids
-                    forced_inputs.append(make_tokens_prompt(combined_ids))
-
-                sp_pass2 = (
-                    sampling_params_factory(
-                        n=1,
-                        max_tokens=FORCED_MAX_TOKENS,
-                        seed=int(seed),
-                        **SAMPLING_DEFAULTS,
-                    )
-                    if sampling_params_factory is not None
-                    else _make_sampling_params(n=1, max_tokens=FORCED_MAX_TOKENS, seed=int(seed))
+            sp_pass2 = (
+                sampling_params_factory(
+                    n=1,
+                    max_tokens=FORCED_MAX_TOKENS,
+                    seed=int(seed),
+                    **SAMPLING_DEFAULTS,
                 )
+                if sampling_params_factory is not None
+                else _make_sampling_params(n=1, max_tokens=FORCED_MAX_TOKENS, seed=int(seed))
+            )
+
+            total_pass1_wall_s = 0.0
+            total_pass2_wall_s = 0.0
+            total_pass1_out_tokens = 0
+            total_pass2_out_tokens = 0
+            total_forced_close_think = 0
+            total_forced_open_box = 0
+            total_generated_samples = 0
+
+            # 1. Re-run Pass 2 with `FORCE_BOX_OPEN_SUFFIX` on any seeded closed-</think> capped records
+            if reforce_keys:
+                rf_inputs: List[Any] = []
+                rf_recs: List[Dict[str, Any]] = []
+                for r_key in reforce_keys:
+                    rec = dict(existing[r_key])
+                    prob_obj = problem_by_uid[str(rec["unique_id"])]
+                    fmt_prompt = _format_prompt_for_problem(tokenizer, prob_obj["problem"])
+                    p_ids = list(tokenizer.encode(fmt_prompt, add_special_tokens=False))
+                    out_ids = rec.get("out_ids")
+                    if out_ids is None:
+                        out_ids = list(tokenizer.encode(str(rec.get("text", "")), add_special_tokens=False))
+                        rec["out_ids"] = [int(t) for t in out_ids]
+                    if "loop_onset_token" not in rec:
+                        rec["loop_onset_token"] = _safe_compute_loop_onset(
+                            str(rec.get("text", "")), tokenizer, token_ids=rec["out_ids"]
+                        )
+                    rf_recs.append(rec)
+                    rf_inputs.append(make_tokens_prompt(p_ids + list(rec["out_ids"]) + force_box_suffix_ids))
 
                 print(
-                    f"[vLLM Sweep] Running forced-answer Pass 2 on {len(capped_indices)} capped sample(s) "
-                    f"(max_tokens={FORCED_MAX_TOKENS}) ...",
+                    f"[vLLM Sweep] Re-forcing {len(rf_recs)} closed-</think> capped sample(s) using open-box suffix ...",
                     flush=True,
                 )
-                t0_p2 = time.perf_counter()
-                outputs_p2 = llm.generate(forced_inputs, sp_pass2)
-                pass2_wall_s = time.perf_counter() - t0_p2
-                per_p2_wall = pass2_wall_s / max(1, len(capped_indices))
+                t0_rf = time.perf_counter()
+                rf_outputs = llm.generate(rf_inputs, sp_pass2)
+                rf_wall = time.perf_counter() - t0_rf
+                total_pass2_wall_s += rf_wall
+                per_rf_wall = rf_wall / max(1, len(rf_recs))
 
-                for idx_s, req_p2 in zip(capped_indices, outputs_p2):
-                    it = staged_items[idx_s]
+                rf_updated: List[Dict[str, Any]] = []
+                for rec, req_p2 in zip(rf_recs, rf_outputs):
                     comp2 = req_p2.outputs[0]
                     f_ids = list(comp2.token_ids)
                     f_toks = len(f_ids)
-                    pass2_out_tokens += f_toks
+                    total_pass2_out_tokens += f_toks
+                    total_forced_open_box += 1
                     f_text = (
                         comp2.text
                         if getattr(comp2, "text", None) is not None
                         else tokenizer.decode(f_ids, skip_special_tokens=False)
                     )
-                    pred_f = extract_last_boxed(f_text)
-                    corr_f = bool(grade_math_answer(pred_f, it["problem"]["answer"]))
+                    pred_f = extract_forced_boxed(f_text, forced_mode="open_box")
+                    corr_f = bool(grade_math_answer(pred_f, rec["gold"]))
+                    rec["forced_tokens"] = f_toks
+                    rec["forced_text"] = f_text
+                    rec["forced_mode"] = "open_box"
+                    rec["pred_forced"] = pred_f
+                    rec["correct_forced"] = corr_f
+                    rec["wall_time_s"] = round(float(rec.get("wall_time_s", 0.0)) + per_rf_wall, 3)
+                    rf_updated.append(rec)
 
-                    it["forced_tokens"] = f_toks
-                    it["pred_forced"] = pred_f
-                    it["correct_forced"] = corr_f
-                    it["wall_time_s"] = round(per_p1_wall + per_p2_wall, 3)
+                with file_lock(lock_path):
+                    cur_merged = _load_existing_records(jsonl_gz_path)
+                    for rec in rf_updated:
+                        cur_merged[_record_key(rec)] = rec
+                    atomic_write_gzip_jsonl(jsonl_gz_path, list(cur_merged.values()))
+                    existing = cur_merged
+                new_records.extend(rf_updated)
 
-            for it in staged_items:
-                if not it["hit_cap"]:
-                    it["forced_tokens"] = 0
-                    it["pred_forced"] = it["pred_strict"]
-                    it["correct_forced"] = it["correct_strict"]
-                    it["wall_time_s"] = round(per_p1_wall, 3)
+            # 2. Execute pending problems in chunks with incremental saving & 5-minute progress heartbeat
+            eff_chunk = max(1, int(chunk_size))
+            total_pending_n = len(pending_problems)
+            sweep_start_ts = time.perf_counter()
 
-                p = it["problem"]
-                new_records.append(
-                    {
-                        "alpha": alpha_f,
-                        "max_new_tokens": int(budget),
-                        "unique_id": str(p["unique_id"]),
-                        "sample_idx": int(it["sample_idx"]),
-                        "subject": str(p["subject"]),
-                        "level": int(p["level"]),
-                        "gold": str(p["answer"]),
-                        "pred": it["pred"],
-                        "correct": bool(it["correct"]),
-                        "pred_strict": it["pred_strict"],
-                        "correct_strict": bool(it["correct_strict"]),
-                        "pred_forced": it["pred_forced"],
-                        "correct_forced": bool(it["correct_forced"]),
-                        "forced_tokens": int(it["forced_tokens"]),
-                        "n_tokens": int(it["n_tokens"]),
-                        "hit_cap": bool(it["hit_cap"]),
-                        "finish_reason": str(it["finish_reason"]),
-                        "closed_think": bool(it["closed_think"]),
-                        "rep_8gram_ratio": round(repeated_8gram_ratio(it["text"]), 4),
-                        "tail_rep_8gram_ratio": round(tail_repeated_8gram_ratio(it["text"]), 4),
-                        "wall_time_s": float(it["wall_time_s"]),
-                        "backend": "vllm",
-                        "gpu": resolved_gpu,
-                        "dtype": resolved_dtype,
-                        "vllm_version": vllm_version,
-                        "text": it["text"],
-                    }
+            for chunk_start in range(0, total_pending_n, eff_chunk):
+                chunk_probs = pending_problems[chunk_start : chunk_start + eff_chunk]
+                chunk_num = (chunk_start // eff_chunk) + 1
+                total_chunks = (total_pending_n + eff_chunk - 1) // eff_chunk
+
+                prompts_str: List[str] = []
+                prompt_ids_list: List[List[int]] = []
+                for p in chunk_probs:
+                    formatted = _format_prompt_for_problem(tokenizer, p["problem"])
+                    prompts_str.append(formatted)
+                    prompt_ids_list.append(list(tokenizer.encode(formatted, add_special_tokens=False)))
+
+                stop_hb = threading.Event()
+                if progress_interval_s > 0:
+                    def _progress_worker(
+                        c_num: int = chunk_num,
+                        t_chunks: int = total_chunks,
+                        done_before: int = chunk_start,
+                        c_len: int = len(chunk_probs),
+                    ) -> None:
+                        while not stop_hb.wait(float(progress_interval_s)):
+                            elapsed_s = time.perf_counter() - sweep_start_ts
+                            tok_so_far = total_pass1_out_tokens + total_pass2_out_tokens
+                            tps = tok_so_far / max(elapsed_s, 1e-6)
+                            rem_probs = max(0, total_pending_n - done_before)
+                            avg_p_wall = (
+                                (elapsed_s / done_before) if done_before > 0 else 6.0
+                            )
+                            eta_s = rem_probs * avg_p_wall
+                            print(
+                                f"[vLLM Sweep] Progress (5m report) | alpha={alpha_f:g} | "
+                                f"chunk {c_num}/{t_chunks} ({done_before}/{total_pending_n} saved, {c_len} active) | "
+                                f"elapsed={elapsed_s:.0f}s | completed_tok/s={tps:.1f} | est_ETA={eta_s:.0f}s",
+                                flush=True,
+                            )
+
+                    hb_thread = threading.Thread(target=_progress_worker, daemon=True)
+                    hb_thread.start()
+
+                try:
+                    t0_p1 = time.perf_counter()
+                    outputs_p1 = llm.generate(prompts_str, sp_pass1)
+                    pass1_wall_s = time.perf_counter() - t0_p1
+                finally:
+                    stop_hb.set()
+
+                total_pass1_wall_s += pass1_wall_s
+
+                staged_items: List[Dict[str, Any]] = []
+                capped_indices: List[int] = []
+                chunk_p1_tokens = 0
+
+                for p, p_ids, req_out in zip(chunk_probs, prompt_ids_list, outputs_p1):
+                    uid = str(p["unique_id"])
+                    needed_samples = set(missing_sample_indices_by_uid[uid])
+                    for s_idx, comp in enumerate(req_out.outputs):
+                        if s_idx not in needed_samples:
+                            continue
+                        out_ids = [int(t) for t in comp.token_ids]
+                        n_toks = len(out_ids)
+                        chunk_p1_tokens += n_toks
+                        finish_reason = str(getattr(comp, "finish_reason", "stop"))
+                        hit_cap = finish_reason == "length"
+                        text = (
+                            comp.text
+                            if getattr(comp, "text", None) is not None
+                            else tokenizer.decode(out_ids, skip_special_tokens=False)
+                        )
+                        closed_think = "</think>" in text
+                        pred = extract_last_boxed(text)
+                        corr = bool(grade_math_answer(pred, p["answer"]))
+                        pred_strict = None if hit_cap else extract_last_boxed_strict(text)
+                        corr_strict = False if hit_cap else bool(grade_math_answer(pred_strict, p["answer"]))
+                        loop_onset = _safe_compute_loop_onset(text, tokenizer, token_ids=out_ids)
+
+                        item_dict = {
+                            "problem": p,
+                            "prompt_ids": p_ids,
+                            "sample_idx": int(s_idx),
+                            "out_ids": out_ids,
+                            "n_tokens": n_toks,
+                            "finish_reason": finish_reason,
+                            "hit_cap": hit_cap,
+                            "text": text,
+                            "closed_think": closed_think,
+                            "pred": pred,
+                            "correct": corr,
+                            "pred_strict": pred_strict,
+                            "correct_strict": corr_strict,
+                            "loop_onset_token": loop_onset,
+                        }
+                        staged_idx = len(staged_items)
+                        staged_items.append(item_dict)
+                        if hit_cap:
+                            capped_indices.append(staged_idx)
+
+                total_pass1_out_tokens += chunk_p1_tokens
+                total_generated_samples += len(staged_items)
+                per_p1_wall = pass1_wall_s / max(1, len(staged_items))
+
+                pass2_wall_s = 0.0
+                chunk_p2_tokens = 0
+                if capped_indices:
+                    forced_inputs: List[Any] = []
+                    forced_modes: List[str] = []
+                    c_open_box = 0
+                    c_close_think = 0
+                    for idx_s in capped_indices:
+                        it = staged_items[idx_s]
+                        if it["closed_think"]:
+                            f_mode = "open_box"
+                            sfx_ids = force_box_suffix_ids
+                            c_open_box += 1
+                        else:
+                            f_mode = "close_think"
+                            sfx_ids = force_close_suffix_ids
+                            c_close_think += 1
+                        forced_modes.append(f_mode)
+                        combined_ids = it["prompt_ids"] + it["out_ids"] + sfx_ids
+                        forced_inputs.append(make_tokens_prompt(combined_ids))
+
+                    total_forced_open_box += c_open_box
+                    total_forced_close_think += c_close_think
+
+                    print(
+                        f"[vLLM Sweep] Running forced-answer Pass 2 on {len(capped_indices)} capped sample(s) "
+                        f"(close_think={c_close_think}, open_box={c_open_box}, max_tokens={FORCED_MAX_TOKENS}) ...",
+                        flush=True,
+                    )
+                    t0_p2 = time.perf_counter()
+                    outputs_p2 = llm.generate(forced_inputs, sp_pass2)
+                    pass2_wall_s = time.perf_counter() - t0_p2
+                    total_pass2_wall_s += pass2_wall_s
+                    per_p2_wall = pass2_wall_s / max(1, len(capped_indices))
+
+                    for idx_s, f_mode, req_p2 in zip(capped_indices, forced_modes, outputs_p2):
+                        it = staged_items[idx_s]
+                        comp2 = req_p2.outputs[0]
+                        f_ids = list(comp2.token_ids)
+                        f_toks = len(f_ids)
+                        chunk_p2_tokens += f_toks
+                        f_text = (
+                            comp2.text
+                            if getattr(comp2, "text", None) is not None
+                            else tokenizer.decode(f_ids, skip_special_tokens=False)
+                        )
+                        pred_f = extract_forced_boxed(f_text, forced_mode=f_mode)
+                        corr_f = bool(grade_math_answer(pred_f, it["problem"]["answer"]))
+
+                        it["forced_tokens"] = f_toks
+                        it["forced_text"] = f_text
+                        it["forced_mode"] = f_mode
+                        it["pred_forced"] = pred_f
+                        it["correct_forced"] = corr_f
+                        it["wall_time_s"] = round(per_p1_wall + per_p2_wall, 3)
+
+                total_pass2_out_tokens += chunk_p2_tokens
+
+                chunk_records: List[Dict[str, Any]] = []
+                for it in staged_items:
+                    if not it["hit_cap"]:
+                        it["forced_tokens"] = 0
+                        it["forced_text"] = None
+                        it["forced_mode"] = None
+                        it["pred_forced"] = it["pred_strict"]
+                        it["correct_forced"] = it["correct_strict"]
+                        it["wall_time_s"] = round(per_p1_wall, 3)
+
+                    p = it["problem"]
+                    chunk_records.append(
+                        {
+                            "alpha": alpha_f,
+                            "max_new_tokens": int(budget),
+                            "unique_id": str(p["unique_id"]),
+                            "sample_idx": int(it["sample_idx"]),
+                            "subject": str(p["subject"]),
+                            "level": int(p["level"]),
+                            "gold": str(p["answer"]),
+                            "pred": it["pred"],
+                            "correct": bool(it["correct"]),
+                            "pred_strict": it["pred_strict"],
+                            "correct_strict": bool(it["correct_strict"]),
+                            "pred_forced": it["pred_forced"],
+                            "correct_forced": bool(it["correct_forced"]),
+                            "forced_tokens": int(it["forced_tokens"]),
+                            "forced_text": it["forced_text"],
+                            "forced_mode": it["forced_mode"],
+                            "n_tokens": int(it["n_tokens"]),
+                            "hit_cap": bool(it["hit_cap"]),
+                            "finish_reason": str(it["finish_reason"]),
+                            "closed_think": bool(it["closed_think"]),
+                            "loop_onset_token": it["loop_onset_token"],
+                            "rep_8gram_ratio": round(repeated_8gram_ratio(it["text"]), 4),
+                            "tail_rep_8gram_ratio": round(tail_repeated_8gram_ratio(it["text"]), 4),
+                            "wall_time_s": float(it["wall_time_s"]),
+                            "backend": "vllm",
+                            "gpu": resolved_gpu,
+                            "dtype": resolved_dtype,
+                            "vllm_version": vllm_version,
+                            "out_ids": it["out_ids"],
+                            "text": it["text"],
+                        }
+                    )
+
+                # Save incremental chunk immediately so zero progress is ever lost
+                with file_lock(lock_path):
+                    cur_merged = _load_existing_records(jsonl_gz_path)
+                    for rec in chunk_records:
+                        cur_merged[_record_key(rec)] = rec
+                    atomic_write_gzip_jsonl(jsonl_gz_path, list(cur_merged.values()))
+                    existing = cur_merged
+
+                new_records.extend(chunk_records)
+
+                done_probs_n = min(total_pending_n, chunk_start + len(chunk_probs))
+                elapsed_all = time.perf_counter() - sweep_start_ts
+                tot_tok_all = total_pass1_out_tokens + total_pass2_out_tokens
+                tps_all = tot_tok_all / max(elapsed_all, 1e-6)
+                rem_n = total_pending_n - done_probs_n
+                eta_all = (elapsed_all / max(1, done_probs_n)) * rem_n
+                print(
+                    f"[vLLM Sweep] Chunk {chunk_num}/{total_chunks} saved ({done_probs_n}/{total_pending_n}) | "
+                    f"elapsed={elapsed_all:.1f}s | tok/s={tps_all:.1f} | ETA={eta_all:.1f}s",
+                    flush=True,
                 )
 
-            total_wall = round(pass1_wall_s + pass2_wall_s, 2)
-            total_out_toks = int(pass1_out_tokens + pass2_out_tokens)
+            total_wall = round(total_pass1_wall_s + total_pass2_wall_s, 2)
+            total_out_toks = int(total_pass1_out_tokens + total_pass2_out_tokens)
             alpha_run_meta = {
                 "alpha": alpha_f,
-                "n_generated_samples": len(staged_items),
-                "n_capped_forced": len(capped_indices),
-                "pass1_wall_s": round(pass1_wall_s, 2),
-                "pass2_wall_s": round(pass2_wall_s, 2),
+                "n_generated_samples": total_generated_samples,
+                "n_capped_forced": int(total_forced_open_box + total_forced_close_think),
+                "n_forced_open_box": int(total_forced_open_box),
+                "n_forced_close_think": int(total_forced_close_think),
+                "pass1_wall_s": round(total_pass1_wall_s, 2),
+                "pass2_wall_s": round(total_pass2_wall_s, 2),
                 "total_wall_s": total_wall,
-                "pass1_output_tokens": int(pass1_out_tokens),
-                "pass2_output_tokens": int(pass2_out_tokens),
+                "pass1_output_tokens": int(total_pass1_out_tokens),
+                "pass2_output_tokens": int(total_pass2_out_tokens),
                 "total_output_tokens": total_out_toks,
                 "output_tok_per_s": round(total_out_toks / max(total_wall, 1e-6), 2),
                 "updated_at_utc": utc_now_iso(),
@@ -542,6 +792,39 @@ def run_vllm_alpha(
         if owned_scratch_ckpt is not None and not keep_ckpt:
             print(f"[vLLM Sweep] Cleaning up scratch checkpoint {owned_scratch_ckpt}", flush=True)
             cleanup_ckpt_dir(owned_scratch_ckpt)
+
+    # Backfill `out_ids` / `loop_onset_token` / `forced_text` on any cached records lacking them
+    if backfill_needed:
+        tok_bf = _get_tokenizer()
+        with file_lock(lock_path):
+            cur_merged = _load_existing_records(jsonl_gz_path)
+            updated_any = False
+            for key, rec in cur_merged.items():
+                if key[0] == alpha_f and key[1] in problem_by_uid and key[3] == int(budget):
+                    txt = str(rec.get("text", ""))
+                    if "out_ids" not in rec:
+                        try:
+                            rec["out_ids"] = [int(t) for t in tok_bf.encode(txt, add_special_tokens=False)]
+                            updated_any = True
+                        except Exception:
+                            pass
+                    if "loop_onset_token" not in rec:
+                        rec["loop_onset_token"] = _safe_compute_loop_onset(
+                            txt, tok_bf, token_ids=rec.get("out_ids")
+                        )
+                        updated_any = True
+                    if "forced_text" not in rec:
+                        rec["forced_text"] = None
+                        updated_any = True
+                    if "forced_mode" not in rec:
+                        rec["forced_mode"] = (
+                            ("open_box" if bool(rec.get("closed_think", "</think>" in txt)) else "close_think")
+                            if bool(rec.get("hit_cap"))
+                            else None
+                        )
+                        updated_any = True
+            if updated_any:
+                atomic_write_gzip_jsonl(jsonl_gz_path, list(cur_merged.values()))
 
     # Locked atomic merge & summary/chart regeneration (safe under parallel 2-GPU execution)
     with file_lock(lock_path):
@@ -561,7 +844,10 @@ def run_vllm_alpha(
         atomic_write_gzip_jsonl(jsonl_gz_path, sorted_records)
 
         if sorted_records:
-            p_rows = [{k: v for k, v in r.items() if k != "text"} for r in sorted_records]
+            p_rows = [
+                {k: v for k, v in r.items() if k not in ("text", "out_ids", "forced_text")}
+                for r in sorted_records
+            ]
             p_df = pd.DataFrame(p_rows)
             atomic_write_text(per_problem_csv, p_df.to_csv(index=False))
 
@@ -636,7 +922,8 @@ def run_vllm_alpha(
                 "max_tokens": FORCED_MAX_TOKENS,
                 "seed": int(seed),
                 "stop_token_ids": list(STOP_TOKEN_IDS),
-                "force_suffix": FORCE_ANSWER_SUFFIX,
+                "force_suffix_close_think": FORCE_ANSWER_SUFFIX,
+                "force_suffix_open_box": FORCE_BOX_OPEN_SUFFIX,
             },
             "engine_config": final_engine_cfg,
             "alpha_stats": alpha_stats,
@@ -665,6 +952,7 @@ def run_vllm_alpha(
         "gpu": resolved_gpu,
         "dtype": resolved_dtype,
         "new_records_count": len(new_records),
+        "seeded_records_count": seeded_count,
         "summary_rows": int(len(s_df)),
         "meta_path": str(meta_path),
     }
@@ -701,6 +989,29 @@ def main(argv: Optional[List[str]] = None) -> None:
         action="store_true",
         help="Do not delete auto-created scratch checkpoint on exit.",
     )
+    parser.add_argument(
+        "--seed-jsonl",
+        type=str,
+        default=None,
+        help="Optional existing sweep_per_problem.jsonl.gz to seed cached records before running remaining problems.",
+    )
+    parser.add_argument(
+        "--no-reforce-closed-capped",
+        action="store_true",
+        help="Skip re-running Pass 2 on seeded closed-</think> capped records.",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=50,
+        help="Problems per incremental checkpoint batch (default: 50).",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=float,
+        default=300.0,
+        help="Seconds between background progress/ETA logs during generation (default: 300).",
+    )
     args = parser.parse_args(argv)
 
     run_vllm_alpha(
@@ -716,6 +1027,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         gpu_mem=args.gpu_mem,
         ckpt_dir=args.ckpt_dir,
         keep_ckpt=args.keep_ckpt,
+        seed_jsonl=args.seed_jsonl,
+        reforce_closed_capped=not args.no_reforce_closed_capped,
+        chunk_size=args.chunk_size,
+        progress_interval_s=args.progress_interval,
     )
 
 

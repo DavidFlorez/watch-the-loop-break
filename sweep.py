@@ -110,7 +110,13 @@ def load_model_and_tokenizer(
 
 
 def load_math500_subset(n: int = 50, seed: int = 0) -> List[Dict[str, Any]]:
-    """Load `HuggingFaceH4/MATH-500` (test split) and select `n` problems deterministically."""
+    """Load `HuggingFaceH4/MATH-500` (test split) and select `n` problems deterministically.
+
+    For `n <= 50`, draws `n` sorted indices with `np.random.default_rng(seed).choice(...)`.
+    For `n > 50`, starts with the exact `n=50` subset (preserving all existing 50-problem runs
+    and `S_50 ⊂ S_100 ⊂ S_200` nesting) and appends `n - 50` deterministically ordered remaining
+    problems using `seed`.
+    """
     ds = load_dataset("HuggingFaceH4/MATH-500", split="test")
     rows = [
         {
@@ -123,12 +129,26 @@ def load_math500_subset(n: int = 50, seed: int = 0) -> List[Dict[str, Any]]:
         }
         for i, r in enumerate(ds)
     ]
-    if n >= len(rows):
-        return rows
-    # Deterministic evenly-spaced stride across the 500 problems (preserves subject/level mix)
-    rng = np.random.default_rng(seed)
-    indices = sorted(rng.choice(len(rows), size=n, replace=False).tolist())
-    return [rows[i] for i in indices]
+    total = len(rows)
+    if n >= total:
+        base_n = min(50, total)
+        base_idx = sorted(np.random.default_rng(seed).choice(total, size=base_n, replace=False).tolist())
+        base_set = set(base_idx)
+        rem_pool = [i for i in range(total) if i not in base_set]
+        rem_order = np.random.default_rng(seed).permutation(rem_pool).tolist()
+        return [rows[i] for i in (base_idx + rem_order)]
+
+    if n <= 50:
+        rng = np.random.default_rng(seed)
+        indices = sorted(rng.choice(total, size=n, replace=False).tolist())
+        return [rows[i] for i in indices]
+
+    base_idx = sorted(np.random.default_rng(seed).choice(total, size=50, replace=False).tolist())
+    base_set = set(base_idx)
+    rem_pool = [i for i in range(total) if i not in base_set]
+    rem_order = np.random.default_rng(seed).permutation(rem_pool).tolist()
+    selected = base_idx + rem_order[: n - 50]
+    return [rows[i] for i in selected]
 
 
 def supports_native_presence_penalty() -> bool:
@@ -414,7 +434,7 @@ def save_sweep_charts(
     ax = axes[1, 0]
     tail_rep8 = summary_df["mean_tail_rep_8gram_pct"].to_numpy()
     ax.plot(alphas, rep8, marker="D", linewidth=2.5, markersize=7.5, color="#9333ea", label="Full-Trace Repeated 8-Gram Ratio (%)")
-    ax.plot(alphas, tail_rep8, marker="^", linewidth=2.0, markersize=7.0, linestyle="--", color="#ec4899", label="Final-512-Token Tail Loop Ratio (%)")
+    ax.plot(alphas, tail_rep8, marker="^", linewidth=2.0, markersize=7.0, linestyle="--", color="#ec4899", label="Last 240 Words Tail Loop Ratio (%)")
     for x, y_r, y_t in zip(alphas, rep8, tail_rep8):
         ax.annotate(f"{y_r:.1f}%", (x, y_r), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=8.5, color="#7e22ce", fontweight="bold")
         ax.annotate(f"{y_t:.1f}%", (x, y_t), textcoords="offset points", xytext=(0, -13 if y_t < y_r else 8), ha="center", fontsize=8.0, color="#db2777")

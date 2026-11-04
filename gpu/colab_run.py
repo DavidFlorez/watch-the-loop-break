@@ -29,7 +29,7 @@ from gpu.gcp_run import (
 DEFAULT_COLAB_GPU = "G4"
 VALID_COLAB_GPUS = ("G4", "L4", "A100", "T4", "H100")
 DEFAULT_SESSION_NAME = "wsp-g4"
-DEFAULT_EXEC_TIMEOUT = 7200  # 2 hours (overrides `colab exec` default 30.0s timeout)
+DEFAULT_EXEC_TIMEOUT = 10800  # 3 hours (overrides `colab exec` default 30.0s timeout)
 
 _SESSION_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$")
 _SAFE_ARCHIVE_NAME_RE = re.compile(r"^wsp_out(?:_summary|_budget_\d+)\.tar\.gz$")
@@ -146,6 +146,13 @@ def build_colab_shell_script(
     smoke_only: bool,
     include_4k: bool = False,
     include_32k: bool = False,
+    out_root: str = "assets",
+    seed_jsonl: Optional[str] = None,
+    derive_budgets: Sequence[int] = (),
+    cached_forced_root: Optional[str] = None,
+    chunk_size: int = 50,
+    progress_interval_s: float = 300.0,
+    skip_aggregate: bool = False,
 ) -> str:
     """Build remote bash script executed inside `/content/wsp/repo` using isolated `uv` virtualenv."""
     ordered_budgets = resolve_ordered_budgets(
@@ -154,6 +161,37 @@ def build_colab_shell_script(
     budget_tokens = " ".join(str(int(b)) for b in ordered_budgets)
     alpha_tokens = " ".join(shlex.quote(f"{float(a):g}") for a in alphas)
     eager_flag = "--enforce-eager" if enforce_eager else ""
+    out_q = shlex.quote(str(out_root))
+    seed_flag = f"--seed-jsonl {shlex.quote(str(seed_jsonl))}" if seed_jsonl else ""
+    cached_forced_flag = (
+        f"--cached-forced-root {shlex.quote(str(cached_forced_root))}" if cached_forced_root else ""
+    )
+
+    derive_step = ""
+    if derive_budgets:
+        der_str = ",".join(str(int(b)) for b in sorted({int(b) for b in derive_budgets}))
+        derive_step = f"""
+    echo "=== [WSP Colab] Deriving nested budgets ({der_str}) + Pass-2 forced answers for alpha=${{ALPHA}} ==="
+    "$VENV_PY" -u gpu/derive_budgets.py \\
+      --src {out_q} \\
+      --out-root {out_q} \\
+      --budgets {shlex.quote(der_str)} \\
+      --alphas "$ALPHA" \\
+      --run-forced \\
+      --ckpt-dir /content/wsp/ckpt \\
+      --dtype {shlex.quote(dtype)} \\
+      --gpu-mem {float(gpu_mem)} \\
+      --seed {int(seed)} \\
+      {cached_forced_flag} \\
+      {eager_flag}
+"""
+
+    agg_step = ""
+    if not skip_aggregate:
+        agg_step = f"""
+echo "=== [WSP Colab] Aggregating cross-budget results ==="
+"$VENV_PY" -u gpu/aggregate.py --out-root {out_q} --notes NOTES.md
+"""
 
     sweep_section = ""
     if not smoke_only:
@@ -162,7 +200,7 @@ BUDGETS=({budget_tokens})
 ALPHAS=({alpha_tokens})
 for BUDGET in "${{BUDGETS[@]}}"; do
   for ALPHA in "${{ALPHAS[@]}}"; do
-    echo "=== [WSP Colab] Running budget=${{BUDGET}} alpha=${{ALPHA}} ==="
+    echo "=== [WSP Colab] Running budget=${{BUDGET}} alpha=${{ALPHA}} out_root={out_root} ==="
     rm -rf /content/wsp/ckpt
     mkdir -p /content/wsp/ckpt
     "$VENV_PY" -u gpu/make_ckpt.py --alpha "$ALPHA" --out /content/wsp/ckpt
@@ -174,15 +212,17 @@ for BUDGET in "${{BUDGETS[@]}}"; do
       --seed {int(seed)} \\
       --dtype {shlex.quote(dtype)} \\
       --gpu-mem {float(gpu_mem)} \\
-      --out-root assets \\
+      --out-root {out_q} \\
       --ckpt-dir /content/wsp/ckpt \\
+      --chunk-size {int(chunk_size)} \\
+      --progress-interval {float(progress_interval_s)} \\
+      {seed_flag} \\
       {eager_flag}
+{derive_step}
     rm -rf /content/wsp/ckpt
   done
 done
-
-echo "=== [WSP Colab] Aggregating cross-budget results ==="
-"$VENV_PY" -u gpu/aggregate.py --out-root assets --notes NOTES.md
+{agg_step}
 """
 
     return f"""#!/usr/bin/env bash
@@ -235,7 +275,7 @@ echo "=== [WSP Colab] Running smoke test on N=8 MATH-500 problems ==="
   --n 8 \\
   --max-tokens 1024 \\
   --seed {int(seed)} \\
-  --out-root assets \\
+  --out-root {out_q} \\
   --gpu-mem {float(gpu_mem)} \\
   {eager_flag}
 {sweep_section}
@@ -253,6 +293,7 @@ def build_colab_remote_driver() -> str:
     return r"""from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -266,6 +307,9 @@ WSP_ROOT = Path("/content/wsp")
 REPO_DIR = WSP_ROOT / "repo"
 
 FORBIDDEN_EXTS = (".safetensors", ".pt", ".bin", ".ckpt")
+PROTECTED_N50_RE = re.compile(
+    r"^assets/(?:budget_(?:4096|8192|16384|32768)/gpu-rtx-pro-6000-bfloat16/|sweep_results\.csv$)"
+)
 
 
 def _safe_extract_tar(src_tar: Path, dst_dir: Path) -> None:
@@ -283,13 +327,16 @@ def _safe_extract_tar(src_tar: Path, dst_dir: Path) -> None:
         tf.extractall(dst_resolved)
 
 
-def _is_packageable_file(path: Path) -> bool:
+def _is_packageable_file(path: Path, repo_dir: Path) -> bool:
     if not path.is_file() or path.is_symlink():
         return False
     name = path.name.lower()
     if name.startswith(".write.lock") or name.startswith(".log.lock") or name.endswith(".log"):
         return False
     if name.endswith(FORBIDDEN_EXTS):
+        return False
+    rel = path.relative_to(repo_dir).as_posix()
+    if PROTECTED_N50_RE.match(rel):
         return False
     return True
 
@@ -301,40 +348,35 @@ def _package_results(repo_dir: Path) -> list[str]:
 
     summary_tar = Path("/content/wsp_out_summary.tar.gz")
     summary_files: list[tuple[Path, str]] = []
-
-    notes = repo_dir / "NOTES.md"
-    if _is_packageable_file(notes):
-        summary_files.append((notes, "NOTES.md"))
+    by_budget: dict[str, list[tuple[Path, str]]] = {}
 
     assets_dir = repo_dir / "assets"
     if assets_dir.is_dir():
-        curve = assets_dir / "budget_curve_gpu.png"
-        if _is_packageable_file(curve):
-            summary_files.append((curve, "assets/budget_curve_gpu.png"))
-
-        for sf in sorted(assets_dir.glob("gpu_smoke_*.json")):
-            if _is_packageable_file(sf):
-                summary_files.append((sf, f"assets/{sf.name}"))
-
-        for bdir in sorted(assets_dir.glob("budget_*")):
-            if not bdir.is_dir():
+        for item in sorted(assets_dir.rglob("*")):
+            if not _is_packageable_file(item, repo_dir):
                 continue
-            budget_suffix = bdir.name.replace("budget_", "")
-            budget_files: list[tuple[Path, str]] = []
-            for item in sorted(bdir.rglob("*")):
-                if not _is_packageable_file(item):
-                    continue
-                rel = item.relative_to(repo_dir).as_posix()
-                budget_files.append((item, rel))
+            rel = item.relative_to(repo_dir).as_posix()
+            parts = Path(rel).parts
+            budget_suffix = None
+            for part in parts:
+                if part.startswith("budget_") and part.replace("budget_", "").isdigit():
+                    budget_suffix = part.replace("budget_", "")
+                    break
+
+            if budget_suffix is not None:
+                by_budget.setdefault(budget_suffix, []).append((item, rel))
                 if not rel.endswith(".jsonl.gz"):
                     summary_files.append((item, rel))
+            else:
+                summary_files.append((item, rel))
 
-            if budget_files and budget_suffix.isdigit():
-                b_tar = Path(f"/content/wsp_out_budget_{budget_suffix}.tar.gz")
-                with tarfile.open(b_tar, "w:gz") as tf:
-                    for src_p, arc_rel in budget_files:
-                        tf.add(src_p, arcname=arc_rel)
-                created.append(b_tar.name)
+    for b_suffix in sorted(by_budget.keys(), key=int):
+        b_files = by_budget[b_suffix]
+        b_tar = Path(f"/content/wsp_out_budget_{b_suffix}.tar.gz")
+        with tarfile.open(b_tar, "w:gz") as tf:
+            for src_p, arc_rel in b_files:
+                tf.add(src_p, arcname=arc_rel)
+        created.append(b_tar.name)
 
     if summary_files:
         with tarfile.open(summary_tar, "w:gz") as tf:
@@ -482,6 +524,28 @@ def stop_session_safe(
         )
 
 
+def _collect_extra_bundle_files(
+    repo_root: Path,
+    *,
+    seed_jsonl: Optional[str] = None,
+    cached_forced_root: Optional[str] = None,
+) -> List[str]:
+    extras: List[str] = []
+    if seed_jsonl:
+        rel = Path(seed_jsonl).as_posix().lstrip("./")
+        if (repo_root / rel).is_file():
+            extras.append(rel)
+    if cached_forced_root:
+        c_root = repo_root / cached_forced_root
+        if c_root.is_dir():
+            for p in sorted(c_root.glob("budget_*/gpu-*/*")):
+                if p.is_file() and p.name in ("sweep_per_problem.jsonl.gz", "meta.json"):
+                    rel = p.relative_to(repo_root).as_posix()
+                    if rel not in extras:
+                        extras.append(rel)
+    return extras
+
+
 def run_on_colab(
     *,
     gpu: str = DEFAULT_COLAB_GPU,
@@ -500,6 +564,13 @@ def run_on_colab(
     gpu_mem: float = 0.85,
     enforce_eager: bool = False,
     smoke_only: bool = False,
+    out_root: str = "assets",
+    seed_jsonl: Optional[str] = None,
+    derive_budgets: Sequence[int] = (),
+    cached_forced_root: Optional[str] = None,
+    chunk_size: int = 50,
+    progress_interval_s: float = 300.0,
+    skip_aggregate: bool = False,
     exec_timeout: int = DEFAULT_EXEC_TIMEOUT,
     keep_session: bool = False,
     dry_run: bool = False,
@@ -522,8 +593,20 @@ def run_on_colab(
         gpu_mem=gpu_mem,
         enforce_eager=enforce_eager,
         smoke_only=smoke_only,
+        out_root=out_root,
+        seed_jsonl=seed_jsonl,
+        derive_budgets=derive_budgets,
+        cached_forced_root=cached_forced_root,
+        chunk_size=chunk_size,
+        progress_interval_s=progress_interval_s,
+        skip_aggregate=skip_aggregate,
     )
     driver_py = build_colab_remote_driver()
+    extra_files = _collect_extra_bundle_files(
+        REPO_ROOT,
+        seed_jsonl=seed_jsonl,
+        cached_forced_root=cached_forced_root,
+    )
 
     if dry_run:
         plan = {
@@ -532,6 +615,11 @@ def run_on_colab(
             "gpu_candidates": gpu_candidates,
             "high_mem": bool(high_mem),
             "budgets": ordered_budgets,
+            "derive_budgets": [int(b) for b in derive_budgets],
+            "out_root": str(out_root),
+            "seed_jsonl": seed_jsonl,
+            "cached_forced_root": cached_forced_root,
+            "extra_bundle_files": extra_files,
             "alphas": [float(a) for a in alphas],
             "exec_timeout_s": timeout_s,
             "keep_session": bool(keep_session),
@@ -606,7 +694,12 @@ def run_on_colab(
             tmp_path = Path(tmp_dir)
             bundle_path = tmp_path / "wsp_bundle.tar.gz"
             driver_path = tmp_path / "colab_driver.py"
-            create_upload_bundle(REPO_ROOT, runner_script=shell_script, bundle_path=bundle_path)
+            create_upload_bundle(
+                REPO_ROOT,
+                runner_script=shell_script,
+                bundle_path=bundle_path,
+                extra_repo_files=extra_files,
+            )
             driver_path.write_text(driver_py, encoding="utf-8")
 
             print(
@@ -622,7 +715,7 @@ def run_on_colab(
                     "/content/wsp_bundle.tar.gz",
                 ],
                 env=colab_env,
-                timeout=120,
+                timeout=180,
                 check=True,
             )
 
@@ -661,7 +754,7 @@ def run_on_colab(
                 print(clean, flush=True)
             exec_ret = exec_proc.wait()
 
-            # Discover & download packaged archives even if a later budget failed partway through
+            # Discover & download packaged archives even if a later step failed partway through
             ls_res = _run_colab(
                 ["ls", "--session", safe_session, "content"],
                 env=colab_env,
@@ -676,9 +769,10 @@ def run_on_colab(
                         remote_archives.append(cleaned)
 
             if not remote_archives:
+                all_expected_b = sorted({*ordered_budgets, *(int(b) for b in derive_budgets)})
                 remote_archives = [
                     "wsp_out_summary.tar.gz",
-                    *(f"wsp_out_budget_{b}.tar.gz" for b in ordered_budgets),
+                    *(f"wsp_out_budget_{b}.tar.gz" for b in all_expected_b),
                 ]
 
             staging_dir = tmp_path / "staging"
@@ -689,66 +783,83 @@ def run_on_colab(
                 f"[Colab] Downloading {len(remote_archives)} archive(s): {remote_archives} ...",
                 flush=True,
             )
+            failed_archives: List[str] = []
             for arch_name in remote_archives:
                 if not _SAFE_ARCHIVE_NAME_RE.match(arch_name):
                     continue
                 local_arch = archives_dir / arch_name
-                dl_res = _run_colab(
-                    [
-                        "download",
-                        "--session",
-                        safe_session,
-                        f"/content/{arch_name}",
-                        str(local_arch),
-                    ],
-                    env=colab_env,
-                    timeout=300,
-                    check=False,
-                )
-                if dl_res.returncode == 0 and local_arch.is_file():
-                    extract_tar_safely(local_arch, staging_dir)
-                else:
+                dl_ok = False
+                dl_err = ""
+                for attempt in range(1, 4):
+                    dl_res = _run_colab(
+                        [
+                            "download",
+                            "--session",
+                            safe_session,
+                            f"/content/{arch_name}",
+                            str(local_arch),
+                        ],
+                        env=colab_env,
+                        timeout=600,
+                        check=False,
+                    )
+                    if dl_res.returncode == 0 and local_arch.is_file():
+                        extract_tar_safely(local_arch, staging_dir)
+                        dl_ok = True
+                        break
                     dl_err = (dl_res.stderr or dl_res.stdout or "").strip()
                     print(
-                        f"[Colab] Note: skipped/missing archive {arch_name} ({dl_err})",
+                        f"[Colab] Retry {attempt}/3 downloading {arch_name} ({dl_err})",
                         flush=True,
                     )
+                if not dl_ok:
+                    failed_archives.append(f"{arch_name}: {dl_err}")
 
             copied_files = merge_downloaded_outputs(staging_dir, REPO_ROOT)
             print(
                 f"[Colab] Merged {len(copied_files)} file(s) safely into local repo.",
                 flush=True,
             )
+            if failed_archives:
+                print(
+                    f"[Colab] Warning: some remote archives failed to download: {failed_archives}",
+                    flush=True,
+                )
 
             if exec_ret != 0 or not saw_clean_sentinel:
                 raise RuntimeError(
                     f"Remote Colab sweep did not complete cleanly (exec_ret={exec_ret}, "
                     f"sentinel={saw_clean_sentinel}, salvaged={len(copied_files)} file(s))."
                 )
+            if failed_archives:
+                raise RuntimeError(f"Failed to download archive(s): {failed_archives}")
 
-        # Re-run local aggregation so 4k MPS baseline + new Colab GPU results are unified in chart & NOTES.md
-        agg_py = REPO_ROOT / ".venv" / "bin" / "python"
-        py_exec = str(agg_py) if agg_py.is_file() else sys.executable
-        if Path(py_exec).is_file() and copied_files:
-            subprocess.run(
-                [
-                    py_exec,
-                    "-u",
-                    str(REPO_ROOT / "gpu" / "aggregate.py"),
-                    "--out-root",
-                    "assets",
-                    "--notes",
-                    "NOTES.md",
-                ],
-                cwd=str(REPO_ROOT),
-                check=False,
-            )
+        # Re-run local aggregation when writing directly to default `assets`
+        if not skip_aggregate and str(out_root) == "assets":
+            agg_py = REPO_ROOT / ".venv" / "bin" / "python"
+            py_exec = str(agg_py) if agg_py.is_file() else sys.executable
+            if Path(py_exec).is_file() and copied_files:
+                subprocess.run(
+                    [
+                        py_exec,
+                        "-u",
+                        str(REPO_ROOT / "gpu" / "aggregate.py"),
+                        "--out-root",
+                        "assets",
+                        "--notes",
+                        "NOTES.md",
+                    ],
+                    cwd=str(REPO_ROOT),
+                    check=False,
+                )
 
         return {
             "completed_at_utc": utc_now_iso(),
             "session_name": safe_session,
             "gpu": active_gpu or gpu_candidates[0],
             "budgets": ordered_budgets,
+            "derive_budgets": [int(b) for b in derive_budgets],
+            "out_root": str(out_root),
             "alphas": [float(a) for a in alphas],
             "synced_files": copied_files,
         }
@@ -825,6 +936,42 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--enforce-eager", action="store_true", help="Disable torch.compile in vLLM.")
     parser.add_argument("--smoke-only", action="store_true", help="Run only the 8-problem smoke test.")
     parser.add_argument(
+        "--out-root",
+        type=str,
+        default="assets",
+        help="Target output root directory under repo (default: assets).",
+    )
+    parser.add_argument(
+        "--seed-jsonl",
+        type=str,
+        default=None,
+        help="Optional repo-relative sweep_per_problem.jsonl.gz to upload and seed cached rows.",
+    )
+    parser.add_argument(
+        "--derive-budgets",
+        type=str,
+        default="",
+        help="Optional comma-separated budgets (e.g. '4096,8192,16384,32768') to derive + force from 32k.",
+    )
+    parser.add_argument(
+        "--cached-forced-root",
+        type=str,
+        default=None,
+        help="Optional repo-relative assets root (e.g. 'assets') to upload & reuse cached Pass-2 forced continuations.",
+    )
+    parser.add_argument("--chunk-size", type=int, default=50, help="Problems per checkpoint chunk (default: 50).")
+    parser.add_argument(
+        "--progress-interval",
+        type=float,
+        default=300.0,
+        help="Seconds between 5-min progress/ETA logs during generation (default: 300).",
+    )
+    parser.add_argument(
+        "--skip-aggregate",
+        action="store_true",
+        help="Skip running gpu/aggregate.py on NOTES.md during this sweep.",
+    )
+    parser.add_argument(
         "--exec-timeout",
         type=int,
         default=DEFAULT_EXEC_TIMEOUT,
@@ -844,6 +991,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     budgets_list = [int(x.strip()) for x in args.budgets.split(",") if x.strip()]
     alphas_list = [float(x.strip()) for x in args.alphas.split(",") if x.strip()]
+    derive_list = [int(x.strip()) for x in (args.derive_budgets or "").split(",") if x.strip()]
     if not budgets_list:
         raise ValueError("At least one budget is required.")
     if not alphas_list:
@@ -866,6 +1014,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         gpu_mem=args.gpu_mem,
         enforce_eager=args.enforce_eager,
         smoke_only=args.smoke_only,
+        out_root=args.out_root,
+        seed_jsonl=args.seed_jsonl,
+        derive_budgets=derive_list,
+        cached_forced_root=args.cached_forced_root,
+        chunk_size=args.chunk_size,
+        progress_interval_s=args.progress_interval,
+        skip_aggregate=args.skip_aggregate,
         exec_timeout=args.exec_timeout,
         keep_session=args.keep_session,
         dry_run=args.dry_run,

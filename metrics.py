@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import math
 import re
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -11,6 +12,9 @@ import torch
 from transformers import LogitsProcessor
 
 MATH_INSTRUCTION = "Please reason step by step, and put your final answer within \\boxed{}."
+LOOP_ONSET_WINDOW_TOKENS = 1024
+LOOP_ONSET_STRIDE_TOKENS = 256
+LOOP_ONSET_THRESHOLD = 0.50
 
 
 def build_math_prompt(problem: str) -> str:
@@ -45,6 +49,69 @@ def tail_repeated_8gram_ratio(text: str, n: int = 8, tail_words: int = 240) -> f
     total = len(tail) - n + 1
     unique = len({tuple(tail[i : i + n]) for i in range(total)})
     return float(total - unique) / float(total)
+
+
+def compute_loop_onset_from_token_ids(
+    token_ids: Sequence[int],
+    tokenizer: Any,
+    *,
+    window_size: int = LOOP_ONSET_WINDOW_TOKENS,
+    stride: int = LOOP_ONSET_STRIDE_TOKENS,
+    threshold: float = LOOP_ONSET_THRESHOLD,
+) -> Optional[int]:
+    """Return first 0-based token offset whose `window_size`-token window exceeds `threshold` repeated 8-grams.
+
+    Slides a `window_size`-token window (default 1024) with `stride` (default 256) across `token_ids`.
+    Each window is decoded via `tokenizer.decode(..., skip_special_tokens=False)` and scored with
+    `repeated_8gram_ratio`. Returns `None` if fewer than `window_size` tokens exist or no window
+    strictly exceeds `threshold` (default 0.50).
+    """
+    n_toks = len(token_ids)
+    w = int(window_size)
+    s = max(1, int(stride))
+    if w <= 0 or n_toks < w:
+        return None
+
+    starts = list(range(0, n_toks - w + 1, s))
+    if (n_toks - w) % s != 0:
+        starts.append(n_toks - w)
+
+    for start in starts:
+        win_ids = token_ids[start : start + w]
+        win_text = tokenizer.decode(win_ids, skip_special_tokens=False)
+        if repeated_8gram_ratio(win_text) > float(threshold):
+            return int(start)
+    return None
+
+
+def compute_loop_onset_token(
+    text: str,
+    tokenizer: Any,
+    *,
+    token_ids: Optional[Sequence[int]] = None,
+    window_size: int = LOOP_ONSET_WINDOW_TOKENS,
+    stride: int = LOOP_ONSET_STRIDE_TOKENS,
+    threshold: float = LOOP_ONSET_THRESHOLD,
+) -> Optional[int]:
+    """Compute `loop_onset_token` from `token_ids` if provided, else by re-tokenizing `text`."""
+    if token_ids is not None:
+        return compute_loop_onset_from_token_ids(
+            token_ids,
+            tokenizer,
+            window_size=window_size,
+            stride=stride,
+            threshold=threshold,
+        )
+    if not text:
+        return None
+    enc_ids = tokenizer.encode(text, add_special_tokens=False)
+    return compute_loop_onset_from_token_ids(
+        enc_ids,
+        tokenizer,
+        window_size=window_size,
+        stride=stride,
+        threshold=threshold,
+    )
 
 
 class PresencePenaltyLogitsProcessor(LogitsProcessor):
@@ -149,6 +216,23 @@ def extract_last_boxed_strict(text: str) -> Optional[str]:
     return _box_at(t_after, idx)
 
 
+def extract_forced_boxed(forced_text: str, forced_mode: str = "close_think") -> Optional[str]:
+    """Extract boxed answer from Pass-2 forced continuation text.
+
+    When `forced_mode == 'open_box'` (prompt already ended with `'\\\\boxed{'`), prepends
+    `'\\\\boxed{'` before running `extract_last_boxed` (with `_box_at(..., 0)` fallback).
+    """
+    if not forced_text:
+        return None
+    if forced_mode == "open_box":
+        prefixed = "\\boxed{" + forced_text
+        val = extract_last_boxed(prefixed)
+        if val is not None:
+            return val
+        return _box_at(prefixed, 0)
+    return extract_last_boxed(forced_text)
+
+
 def wilson_ci(successes: int, total: int, z: float = 1.959963984540054) -> Tuple[float, float]:
     """Compute Wilson score confidence interval (default 95%) as `(low_frac, high_frac)` in `[0.0, 1.0]`."""
     if total <= 0:
@@ -164,6 +248,57 @@ def wilson_ci(successes: int, total: int, z: float = 1.959963984540054) -> Tuple
     low = 0.0 if k == 0 else max(0.0, center - margin)
     high = 1.0 if k == n_int else min(1.0, center + margin)
     return (low, high)
+
+
+def exact_mcnemar_test(a_correct: Sequence[bool], b_correct: Sequence[bool]) -> Dict[str, Any]:
+    """Compute paired two-sided exact McNemar test over binary correctness vectors `a_correct` and `b_correct`.
+
+    Discordant counts:
+        `n10`: `a_correct[i]` is True and `b_correct[i]` is False
+        `n01`: `a_correct[i]` is False and `b_correct[i]` is True
+    Exact two-sided p-value is `2 * sum_{j=0}^{min(n10, n01)} C(n10+n01, j) * 0.5^(n10+n01)` clamped to `1.0`.
+    """
+    if len(a_correct) != len(b_correct):
+        raise ValueError(f"Paired length mismatch: {len(a_correct)} vs {len(b_correct)}")
+    n_total = len(a_correct)
+    n11 = 0
+    n10 = 0
+    n01 = 0
+    n00 = 0
+    for a_val, b_val in zip(a_correct, b_correct):
+        ab = bool(a_val)
+        bb = bool(b_val)
+        if ab and bb:
+            n11 += 1
+        elif ab and not bb:
+            n10 += 1
+        elif not ab and bb:
+            n01 += 1
+        else:
+            n00 += 1
+
+    discordant = n10 + n01
+    if discordant == 0:
+        p_val = 1.0
+    else:
+        k = min(n10, n01)
+        tail_sum = sum(math.comb(discordant, j) for j in range(k + 1))
+        p_val = min(1.0, float(tail_sum) * (2.0 ** (1 - discordant)))
+
+    acc_a = (n11 + n10) / n_total if n_total > 0 else 0.0
+    acc_b = (n11 + n01) / n_total if n_total > 0 else 0.0
+    return {
+        "n_paired": n_total,
+        "n11_both_correct": n11,
+        "n10_a_only": n10,
+        "n01_b_only": n01,
+        "n00_both_wrong": n00,
+        "discordant": discordant,
+        "p_value": p_val,
+        "acc_a_pct": round(acc_a * 100.0, 2),
+        "acc_b_pct": round(acc_b * 100.0, 2),
+        "diff_b_minus_a_pp": round((acc_b - acc_a) * 100.0, 2),
+    }
 
 
 def _strip_math_string(string: str) -> str:
@@ -203,6 +338,8 @@ def is_equiv_str(pred: Optional[str], gold: Optional[str]) -> bool:
 def _mv_parse(expr: str, timeout: Optional[int]):
     import math_verify
 
+    if len(expr) > 2048:
+        return None
     return math_verify.parse("\\boxed{" + expr + "}", parsing_timeout=timeout)
 
 

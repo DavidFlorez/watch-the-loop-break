@@ -569,11 +569,16 @@ _PROTECTED_ROOT_ASSETS = frozenset(
 )
 
 
+_PROTECTED_N50_GPU_RE = re.compile(
+    r"^assets/budget_(?:4096|8192|16384|32768)/gpu-rtx-pro-6000-bfloat16/"
+)
+
+
 def _is_safe_result_relpath(rel_path: str) -> bool:
     """Validate relative artifact path copied back from remote VM."""
     if not rel_path or rel_path.startswith("/") or "\\" in rel_path:
         return False
-    if rel_path in _PROTECTED_ROOT_ASSETS:
+    if rel_path in _PROTECTED_ROOT_ASSETS or _PROTECTED_N50_GPU_RE.match(rel_path):
         return False
     p = Path(rel_path)
     if p.is_absolute() or ".." in p.parts:
@@ -588,23 +593,43 @@ def _is_safe_result_relpath(rel_path: str) -> bool:
     return False
 
 
-def create_upload_bundle(repo_root: Path, runner_script: str, bundle_path: Path) -> None:
+def create_upload_bundle(
+    repo_root: Path,
+    runner_script: str,
+    bundle_path: Path,
+    extra_repo_files: Optional[Sequence[Union[str, Path]]] = None,
+) -> None:
     """Package local code + scripts (no `.safetensors`, `.venv`, or `.git`) into a tar.gz bundle."""
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    added_arcnames = set()
     with tarfile.open(bundle_path, "w:gz") as tf:
         for fname in _UPLOAD_EXACT_FILES:
             fpath = repo_root / fname
             if fpath.is_file():
-                tf.add(fpath, arcname=f"repo/{fname}")
+                arc = f"repo/{fname}"
+                tf.add(fpath, arcname=arc)
+                added_arcnames.add(arc)
 
         gpu_dir = repo_root / "gpu"
         for pyfile in sorted(gpu_dir.glob("*.py")):
             if pyfile.is_file():
-                tf.add(pyfile, arcname=f"repo/gpu/{pyfile.name}")
+                arc = f"repo/gpu/{pyfile.name}"
+                tf.add(pyfile, arcname=arc)
+                added_arcnames.add(arc)
 
         mps_csv = repo_root / "assets" / "sweep_results.csv"
         if mps_csv.is_file():
-            tf.add(mps_csv, arcname="repo/assets/sweep_results.csv")
+            arc = "repo/assets/sweep_results.csv"
+            tf.add(mps_csv, arcname=arc)
+            added_arcnames.add(arc)
+
+        for extra in extra_repo_files or ():
+            rel = Path(extra).as_posix().lstrip("./")
+            fpath = repo_root / rel
+            arc = f"repo/{rel}"
+            if fpath.is_file() and arc not in added_arcnames:
+                tf.add(fpath, arcname=arc)
+                added_arcnames.add(arc)
 
         script_bytes = runner_script.encode("utf-8")
         info = tarfile.TarInfo(name="repo/run_remote.sh")

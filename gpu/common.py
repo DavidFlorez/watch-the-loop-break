@@ -36,6 +36,7 @@ FORCE_ANSWER_SUFFIX = (
     "\n\nConsidering the limited time, I have to give the solution based on the thinking directly now.\n"
     "</think>\n\n"
 )
+FORCE_BOX_OPEN_SUFFIX = "\n\nTherefore, the final answer is \\boxed{"
 FORCED_MAX_TOKENS = 512
 
 # Official 32k MATH-500 reference points from Takehi et al. (2026) / lm_understand-logs
