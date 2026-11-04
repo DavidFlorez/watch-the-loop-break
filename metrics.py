@@ -121,7 +121,10 @@ def _box_at(text: str, idx: int) -> Optional[str]:
 
 
 def extract_last_boxed(text: str) -> Optional[str]:
-    """Extract the content of the last `\\boxed{...}` or `\\fbox{...}` in `text`."""
+    """Extract the content of the last `\\boxed{...}` or `\\fbox{...}` in `text`.
+
+    First inspects text after the last `</think>` if present, falling back to full text if no box follows.
+    """
     # First look after </think> if present; fallback to full text if no box after </think>
     t_after = answer_text_after_think(text)
     for candidate in (t_after, text):
@@ -133,6 +136,34 @@ def extract_last_boxed(text: str) -> Optional[str]:
             if val is not None:
                 return val
     return None
+
+
+def extract_last_boxed_strict(text: str) -> Optional[str]:
+    """Paper-style strict boxed extraction: only inspect text after the last `</think>` if present, no fallback."""
+    t_after = answer_text_after_think(text)
+    idx = t_after.rfind("\\boxed")
+    if idx < 0:
+        idx = t_after.rfind("\\fbox")
+    if idx < 0:
+        return None
+    return _box_at(t_after, idx)
+
+
+def wilson_ci(successes: int, total: int, z: float = 1.959963984540054) -> Tuple[float, float]:
+    """Compute Wilson score confidence interval (default 95%) as `(low_frac, high_frac)` in `[0.0, 1.0]`."""
+    if total <= 0:
+        return (0.0, 0.0)
+    n_int = int(total)
+    k = max(0, min(int(successes), n_int))
+    n = float(n_int)
+    p_hat = k / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p_hat + z2 / (2.0 * n)) / denom
+    margin = (z * ((p_hat * (1.0 - p_hat) / n + z2 / (4.0 * n * n)) ** 0.5)) / denom
+    low = 0.0 if k == 0 else max(0.0, center - margin)
+    high = 1.0 if k == n_int else min(1.0, center + margin)
+    return (low, high)
 
 
 def _strip_math_string(string: str) -> str:

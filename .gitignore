@@ -12,11 +12,16 @@ __pycache__/
 build/
 dist/
 
-# Local caches & temporary outputs
+# Local caches, scratch checkpoints & temporary outputs
 .cache/
 .hf_cache/
+ckpt_*/
+checkpoints/
+scratch_ckpt*/
+*.safetensors
 *.tmp
 *.bak
+.write.lock
 .DS_Store
 
 # Keep assets/ and sweep results tracked in git
@@ -25,3 +30,8 @@ dist/
 !assets/*.csv
 !assets/*.json
 !assets/*.jsonl
+!assets/**/*.png
+!assets/**/*.csv
+!assets/**/*.json
+!assets/**/*.jsonl.gz
+!assets/**/run.log

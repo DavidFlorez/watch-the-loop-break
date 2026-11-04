@@ -332,6 +332,7 @@ def save_sweep_charts(
     summary_df: pd.DataFrame,
     per_problem_df: pd.DataFrame,
     out_dir: str = "assets",
+    max_new_tokens: int = 4096,
 ) -> Tuple[str, str]:
     """Create and save publication-quality charts from the alpha sweep results."""
     Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -344,6 +345,13 @@ def save_sweep_charts(
     toks = summary_df["mean_tokens"].to_numpy()
     wall = summary_df["wall_time_s"].to_numpy()
     rep8 = summary_df["mean_rep_8gram_pct"].to_numpy()
+    has_forced = "forced_accuracy_pct" in summary_df.columns
+    forced_acc = summary_df["forced_accuracy_pct"].to_numpy() if has_forced else None
+    n_prob_label = (
+        int(summary_df["n_problems"].iloc[0])
+        if "n_problems" in summary_df.columns and len(summary_df) > 0
+        else 50
+    )
 
     # 1. Main 4-panel dashboard (`assets/sweep_charts.png`)
     fig, axes = plt.subplots(2, 2, figsize=(13.5, 9.2), dpi=160)
@@ -351,10 +359,34 @@ def save_sweep_charts(
 
     # Panel A: Accuracy vs % Hitting Token Cap
     ax = axes[0, 0]
-    ax.plot(alphas, acc, marker="o", linewidth=2.6, markersize=8, color="#16a34a", label="MATH-500 Accuracy (%)")
-    ax.plot(alphas, cap, marker="s", linewidth=2.4, markersize=7.5, color="#dc2626", linestyle="--", label="% Hitting 4096-Token Cap")
-    for x, y_a, y_c in zip(alphas, acc, cap):
+    acc_label = "Strict Accuracy (%)" if has_forced else "MATH-500 Accuracy (%)"
+    ax.plot(alphas, acc, marker="o", linewidth=2.6, markersize=8, color="#16a34a", label=acc_label)
+    if has_forced and forced_acc is not None:
+        ax.plot(
+            alphas,
+            forced_acc,
+            marker="^",
+            linewidth=2.2,
+            markersize=7.5,
+            linestyle="-.",
+            color="#2563eb",
+            label="Forced-Answer Accuracy (%)",
+        )
+    ax.plot(
+        alphas,
+        cap,
+        marker="s",
+        linewidth=2.4,
+        markersize=7.5,
+        color="#dc2626",
+        linestyle="--",
+        label=f"% Hitting {max_new_tokens}-Token Cap",
+    )
+    for idx_pt, (x, y_a, y_c) in enumerate(zip(alphas, acc, cap)):
         ax.annotate(f"{y_a:.1f}%", (x, y_a), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=8.5, color="#15803d", fontweight="bold")
+        if has_forced and forced_acc is not None:
+            y_f = forced_acc[idx_pt]
+            ax.annotate(f"{y_f:.1f}%", (x, y_f), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=8.0, color="#1d4ed8")
         ax.annotate(f"{y_c:.1f}%", (x, y_c), textcoords="offset points", xytext=(0, -14), ha="center", fontsize=8.5, color="#b91c1c")
     ax.axvline(1.0, color="#64748b", linestyle=":", alpha=0.7, label="α = 1.0 (Published Edit)")
     ax.set_title("A. Accuracy vs. Token-Cap Truncation Across α", fontsize=11.5, fontweight="bold")
@@ -368,13 +400,13 @@ def save_sweep_charts(
     # Panel B: Mean Generated Tokens vs α
     ax = axes[0, 1]
     bars = ax.bar([str(a) for a in alphas], toks, color=["#ef4444", "#f59e0b", "#10b981", "#3b82f6", "#6366f1"][: len(alphas)], width=0.55, alpha=0.88)
-    ax.axhline(4096, color="#dc2626", linestyle="--", linewidth=1.4, label="Token Cap (4096)")
+    ax.axhline(max_new_tokens, color="#dc2626", linestyle="--", linewidth=1.4, label=f"Token Cap ({max_new_tokens})")
     for bar, val in zip(bars, toks):
-        ax.text(bar.get_x() + bar.get_width() / 2, val + 70, f"{val:.0f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
-    ax.set_title("B. Mean Generated Tokens per Problem (Max 4096)", fontsize=11.5, fontweight="bold")
+        ax.text(bar.get_x() + bar.get_width() / 2, val + max_new_tokens * 0.017, f"{val:.0f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
+    ax.set_title(f"B. Mean Generated Tokens per Problem (Max {max_new_tokens})", fontsize=11.5, fontweight="bold")
     ax.set_xlabel("Interpolation Coefficient α")
     ax.set_ylabel("Mean New Tokens")
-    ax.set_ylim(0, 4600)
+    ax.set_ylim(0, max_new_tokens * 1.125)
     ax.grid(True, axis="y", linestyle="--", alpha=0.35)
     ax.legend(loc="upper right", fontsize=8.8)
 
@@ -400,14 +432,15 @@ def save_sweep_charts(
     bars_w = ax.bar([str(a) for a in alphas], wall, color="#0284c7", width=0.55, alpha=0.85)
     for bar, val in zip(bars_w, wall):
         ax.text(bar.get_x() + bar.get_width() / 2, val + max(wall) * 0.02, f"{val:.1f}s", ha="center", va="bottom", fontsize=9, fontweight="bold")
-    ax.set_title("D. Wall-Clock Evaluation Time per α (N=50 Problems)", fontsize=11.5, fontweight="bold")
+    ax.set_title(f"D. Wall-Clock Evaluation Time per α (N={n_prob_label} Problems)", fontsize=11.5, fontweight="bold")
     ax.set_xlabel("Interpolation Coefficient α")
     ax.set_ylabel("Wall Time (seconds)")
-    ax.set_ylim(0, max(wall) * 1.18 if len(wall) else 10)
+    max_w = float(max(wall)) if len(wall) else 0.0
+    ax.set_ylim(0, max_w * 1.18 if max_w > 0 else 10.0)
     ax.grid(True, axis="y", linestyle="--", alpha=0.35)
 
     fig.suptitle(
-        "Watch the Loop Break: Weight-Space Interpolation Sweep on MATH-500 (N=50, Qwen3.5-0.8B)",
+        f"Watch the Loop Break: Weight-Space Interpolation Sweep on MATH-500 (N={n_prob_label}, Budget={max_new_tokens}, Qwen3.5-0.8B)",
         fontsize=13.5,
         fontweight="bold",
         y=1.01,
@@ -428,7 +461,8 @@ def save_sweep_charts(
             continue
         jitter = np.random.default_rng(int(a * 100)).uniform(-0.04, 0.04, size=len(sub))
         c = palette.get(float(a), "#475569")
-        correct_mask = sub["correct"].astype(bool)
+        correct_col = "correct_strict" if "correct_strict" in sub.columns else "correct"
+        correct_mask = sub[correct_col].astype(bool)
         ax1.scatter(
             np.full(correct_mask.sum(), a) + jitter[correct_mask],
             sub.loc[correct_mask, "n_tokens"],
@@ -446,7 +480,7 @@ def save_sweep_charts(
             alpha=0.65,
             s=36,
         )
-    ax1.axhline(4096, color="#dc2626", linestyle="--", linewidth=1.2, label="Token Cap (4096)")
+    ax1.axhline(max_new_tokens, color="#dc2626", linestyle="--", linewidth=1.2, label=f"Token Cap ({max_new_tokens})")
     ax1.set_xticks(alphas)
     ax1.set_title("Per-Problem Token Length by α (● Correct, ✕ Wrong/Cap)", fontsize=11, fontweight="bold")
     ax1.set_xlabel("Interpolation Coefficient α")
@@ -577,7 +611,7 @@ def run_sweep(
         s_df.to_csv(summary_csv, index=False)
         p_df = pd.DataFrame([{k: v for k, v in r.items() if k != "text"} for r in cum_records])
         p_df.to_csv(per_problem_csv, index=False)
-        save_sweep_charts(s_df, p_df, out_dir=out_dir)
+        save_sweep_charts(s_df, p_df, out_dir=out_dir, max_new_tokens=max_new_tokens)
         return s_df, p_df
 
     for alpha in alphas:

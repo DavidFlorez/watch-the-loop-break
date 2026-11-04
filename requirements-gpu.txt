@@ -1,0 +1,19 @@
+# GPU / vLLM requirements for free Kaggle (T4 x2) and Google Colab (T4, CC >= 7.5).
+#
+# CRITICAL WARNING:
+# Do NOT install `requirements.txt` on GPU! `requirements.txt` pins
+# `transformers==5.21.0` and `torch==2.14.1` for Apple Silicon MPS, which
+# directly conflict with `vllm==0.33.0` (`torch==2.14.0`, `transformers<5.21.0`).
+# Install this file BEFORE importing `torch` or `transformers` in the runtime.
+
+vllm==0.33.0
+torch==2.14.0
+transformers>=5.16.1,<5.21.0
+datasets
+math-verify==0.9.0
+pandas
+matplotlib
+safetensors>=0.6.2
+huggingface_hub>=1.31.0
+numpy
+tqdm
