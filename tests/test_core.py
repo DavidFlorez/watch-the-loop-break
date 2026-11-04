@@ -508,11 +508,208 @@ class TestGpuExecutionPath(unittest.TestCase):
         self.assertGreaterEqual(len(raw_nb["cells"]), 7)
         code_cells = [c for c in raw_nb["cells"] if c["cell_type"] == "code"]
         self.assertEqual(len(code_cells), 7)
+        joined_sources = []
         for cell in code_cells:
             self.assertEqual(cell.get("outputs"), [])
             self.assertIsNone(cell.get("execution_count"))
             src = "".join(cell["source"])
             ast.parse(src)
+            joined_sources.append(src)
+        full_nb_src = "\n".join(joined_sources)
+        self.assertIn("VENV_PYTHON", full_nb_src)
+        self.assertIn("--torch-backend=auto", full_nb_src)
+        self.assertNotIn("os.kill(os.getpid(), 9)", full_nb_src)
+
+    def test_native_bfloat16_support_and_auto_dtype(self) -> None:
+        from gpu.common import supports_native_bfloat16
+        from gpu.smoke_test import run_smoke_test
+        from gpu.vllm_sweep import resolve_dtype_choice
+
+        self.assertTrue(supports_native_bfloat16({"compute_capability": 8.9}))
+        self.assertTrue(supports_native_bfloat16({"compute_capability": 8.0}))
+        self.assertFalse(supports_native_bfloat16({"compute_capability": 7.5}))
+        self.assertFalse(supports_native_bfloat16({"compute_capability": None}))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self.assertEqual(
+                resolve_dtype_choice("bfloat16", tmp_path, "l4", native_bf16_override=True),
+                "bfloat16",
+            )
+            self.assertEqual(
+                resolve_dtype_choice("auto", tmp_path, "l4", native_bf16_override=True),
+                "bfloat16",
+            )
+            self.assertEqual(
+                resolve_dtype_choice("auto", tmp_path, "t4", native_bf16_override=False),
+                "float32",
+            )
+
+            problems = [
+                {
+                    "unique_id": f"test/algebra/{i}.json",
+                    "problem": f"Compute {i}+{i}",
+                    "answer": str(2 * i),
+                    "subject": "Algebra",
+                    "level": 1,
+                }
+                for i in range(4)
+            ]
+            ckpt_0 = tmp_path / "c0"
+            ckpt_1 = tmp_path / "c1"
+            ckpt_0.mkdir()
+            ckpt_1.mkdir()
+
+            class DummyTok:
+                def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=True, enable_thinking=True):
+                    return "<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\n<think>\n"
+
+            class DummyEngine:
+                def __init__(self, **kwargs):
+                    self.dtype = kwargs["dtype"]
+
+                def generate(self, prompts, sp):
+                    outs = []
+                    for _ in prompts:
+                        txt = f"<think>\nok ({self.dtype})\n</think>\n\n\\boxed{{2}}"
+                        outs.append(
+                            types.SimpleNamespace(
+                                outputs=[
+                                    types.SimpleNamespace(
+                                        token_ids=[1, 2, 3],
+                                        text=txt,
+                                        finish_reason="stop",
+                                    )
+                                ]
+                            )
+                        )
+                    return outs
+
+            with (
+                mock.patch("gpu.smoke_test.load_math500_subset", return_value=problems),
+                mock.patch(
+                    "gpu.smoke_test.collect_environment_metadata",
+                    return_value={
+                        "gpu_tag": "l4",
+                        "gpu_name": "NVIDIA L4",
+                        "compute_capability": 8.9,
+                        "native_bfloat16": True,
+                        "nvidia_smi": {"available": True, "compute_capability": 8.9, "gpus": []},
+                        "pip_freeze_filtered": [],
+                        "package_versions": {},
+                    },
+                ),
+            ):
+                rep = run_smoke_test(
+                    n_problems=4,
+                    max_tokens=128,
+                    out_root=str(tmp_path),
+                    llm_cls=DummyEngine,
+                    sampling_params_factory=lambda **kw: types.SimpleNamespace(**kw),
+                    tokenizer_override=DummyTok(),
+                    ckpt_dirs_override={0.0: ckpt_0, 1.0: ckpt_1},
+                    require_gpu=False,
+                    native_bf16_override=True,
+                )
+
+            self.assertTrue(rep["native_bfloat16"])
+            self.assertTrue(rep["bf16_passed"])
+            self.assertEqual(rep["recommended_dtype"], "bfloat16")
+            self.assertEqual(
+                resolve_dtype_choice("auto", tmp_path, "l4", native_bf16_override=True),
+                "bfloat16",
+            )
+
+    def test_gcp_runner_helpers_and_dry_run(self) -> None:
+        from gpu.gcp_run import (
+            _is_safe_result_relpath,
+            build_create_instance_cmd,
+            build_gcloud_env,
+            build_remote_runner_script,
+            check_region_gpu_quota,
+            create_upload_bundle,
+            merge_downloaded_outputs,
+            run_on_gcp,
+        )
+
+        # 1. Attribution env & non-interactive prompts
+        env = build_gcloud_env({"FOO": "bar"})
+        self.assertEqual(env["CLOUDSDK_CORE_DISABLE_PROMPTS"], "1")
+        self.assertIn("datacloud.antigravity", env["CLOUDSDK_METRICS_ENVIRONMENT"].split())
+
+        # 2. Quota inspection (Spot L4 vs T4 fallback)
+        quotas = [
+            {"metric": "PREEMPTIBLE_NVIDIA_L4_GPUS", "limit": 0.0, "usage": 0.0},
+            {"metric": "PREEMPTIBLE_NVIDIA_T4_GPUS", "limit": 1.0, "usage": 0.0},
+        ]
+        self.assertEqual(check_region_gpu_quota(quotas, "l4", is_spot=True), 0.0)
+        self.assertEqual(check_region_gpu_quota(quotas, "t4", is_spot=True), 1.0)
+
+        # 3. Create VM command & cost safety flags
+        cmd = build_create_instance_cmd(
+            vm_name="wsp-test-vm",
+            project="valid-project-123",
+            zone="us-central1-a",
+            gpu_key="l4",
+            provisioning="spot",
+            max_minutes=45,
+        )
+        cmd_str = " ".join(cmd)
+        self.assertIn("--machine-type=g2-standard-4", cmd_str)
+        self.assertIn("--accelerator=type=nvidia-l4,count=1", cmd_str)
+        self.assertIn("--provisioning-model=SPOT", cmd_str)
+        self.assertIn("--max-run-duration=2700s", cmd_str)
+        self.assertIn("--instance-termination-action=DELETE", cmd_str)
+        with self.assertRaises(ValueError):
+            build_create_instance_cmd(
+                vm_name="../bad-name",
+                project="valid-project-123",
+                zone="us-central1-a",
+                gpu_key="l4",
+            )
+
+        # 4. Remote runner script uses isolated uv venv & cleans scratch
+        script = build_remote_runner_script(
+            budgets=[8192, 16384],
+            alphas=[0.0, 1.0],
+            n_problems=50,
+            samples=1,
+            seed=0,
+            dtype="auto",
+            gpu_mem=0.85,
+            enforce_eager=False,
+            smoke_only=False,
+        )
+        self.assertIn("--torch-backend=auto", script)
+        self.assertIn("/opt/wsp/venv", script)
+        self.assertIn("rm -rf /tmp/wsp_ckpt", script)
+
+        # 5. Path safety & upload bundle exclusions
+        self.assertTrue(_is_safe_result_relpath("assets/budget_8192/gpu-l4-bfloat16/sweep_results.csv"))
+        self.assertTrue(_is_safe_result_relpath("NOTES.md"))
+        self.assertFalse(_is_safe_result_relpath("../secret.txt"))
+        self.assertFalse(_is_safe_result_relpath("assets/budget_8192/model.safetensors"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            staging = tmp_path / "stage"
+            (staging / "assets" / "budget_8192" / "gpu-l4-bfloat16").mkdir(parents=True)
+            (staging / "assets" / "budget_8192" / "gpu-l4-bfloat16" / "sweep_results.csv").write_text("alpha\n0.0\n", encoding="utf-8")
+            (staging / "assets" / "budget_8192" / "gpu-l4-bfloat16" / "weights.safetensors").write_bytes(b"123")
+            dst_repo = tmp_path / "repo"
+            dst_repo.mkdir()
+            copied = merge_downloaded_outputs(staging, dst_repo)
+            self.assertEqual(copied, ["assets/budget_8192/gpu-l4-bfloat16/sweep_results.csv"])
+            self.assertFalse((dst_repo / "assets" / "budget_8192" / "gpu-l4-bfloat16" / "weights.safetensors").exists())
+
+            bundle_path = tmp_path / "bundle.tar.gz"
+            create_upload_bundle(Path.cwd(), runner_script=script, bundle_path=bundle_path)
+            self.assertTrue(bundle_path.is_file())
+
+        # 6. Offline dry-run smoke check
+        plan = run_on_gcp(project="valid-project-123", gpu="auto", dry_run=True)
+        self.assertTrue(plan["dry_run"])
+        self.assertEqual(plan["machine_type"], "g2-standard-4")
 
 
 if __name__ == "__main__":

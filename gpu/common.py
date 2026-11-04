@@ -250,8 +250,20 @@ def query_nvidia_smi() -> Dict[str, Any]:
     return info
 
 
+def supports_native_bfloat16(smi_info: Optional[Dict[str, Any]] = None) -> bool:
+    """Return True when the active NVIDIA GPU has compute capability >= 8.0 (e.g., Ampere A100 or Ada L4)."""
+    info = smi_info if smi_info is not None else query_nvidia_smi()
+    cc = info.get("compute_capability")
+    if cc is None and info.get("gpus"):
+        cc = info["gpus"][0].get("compute_capability")
+    try:
+        return cc is not None and float(cc) >= 8.0
+    except (TypeError, ValueError):
+        return False
+
+
 def detect_gpu_info(gpu_tag_override: Optional[str] = None) -> Dict[str, Any]:
-    """Detect GPU metadata and return normalized tag (e.g. 't4')."""
+    """Detect GPU metadata and return normalized tag (e.g. 't4', 'l4')."""
     smi = query_nvidia_smi()
     gpu_name = smi.get("gpu_name")
     if not gpu_name:
@@ -267,6 +279,8 @@ def detect_gpu_info(gpu_tag_override: Optional[str] = None) -> Dict[str, Any]:
     return {
         "gpu_tag": tag,
         "gpu_name": gpu_name or tag.upper(),
+        "compute_capability": smi.get("compute_capability"),
+        "native_bfloat16": supports_native_bfloat16(smi),
         "nvidia_smi": smi,
     }
 
@@ -277,7 +291,7 @@ def check_min_compute_capability(min_cc: float = 7.5, require_gpu: bool = True) 
     if not smi["available"] or not smi["gpus"]:
         if require_gpu:
             raise RuntimeError(
-                "No NVIDIA GPU detected via nvidia-smi. Enable a GPU runtime (e.g., Kaggle T4 x2 or Colab T4)."
+                "No NVIDIA GPU detected via nvidia-smi. Enable a GPU runtime (e.g., Kaggle T4 x2, Colab T4, or GCE L4/T4)."
             )
         return smi
 
@@ -327,6 +341,8 @@ def collect_environment_metadata(gpu_tag_override: Optional[str] = None) -> Dict
         "runtime": "kaggle" if is_kaggle() else ("colab" if is_colab() else "local"),
         "gpu_tag": gpu_info["gpu_tag"],
         "gpu_name": gpu_info["gpu_name"],
+        "compute_capability": gpu_info["compute_capability"],
+        "native_bfloat16": gpu_info["native_bfloat16"],
         "nvidia_smi": gpu_info["nvidia_smi"],
         "pip_freeze_filtered": get_pip_freeze_filtered(),
         "package_versions": pkg_versions,

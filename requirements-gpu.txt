@@ -1,10 +1,12 @@
-# GPU / vLLM requirements for free Kaggle (T4 x2) and Google Colab (T4, CC >= 7.5).
+# GPU / vLLM requirements for Google Cloud (L4 / T4), Kaggle (T4 x2), and Google Colab (T4 / L4, CC >= 7.5).
 #
 # CRITICAL WARNING:
-# Do NOT install `requirements.txt` on GPU! `requirements.txt` pins
-# `transformers==5.21.0` and `torch==2.14.1` for Apple Silicon MPS, which
-# directly conflict with `vllm==0.33.0` (`torch==2.14.0`, `transformers<5.21.0`).
-# Install this file BEFORE importing `torch` or `transformers` in the runtime.
+# 1. Do NOT install `requirements.txt` on GPU! `requirements.txt` pins
+#    `transformers==5.21.0` and `torch==2.14.1` for Apple Silicon MPS, which
+#    conflict with `vllm==0.33.0` (`torch==2.14.0`, `transformers<5.21.0`).
+# 2. On Colab / GCE, install into an isolated `uv` virtualenv so preloaded
+#    system `site-packages` and CUDA 12/13 wheel tags match the host driver:
+#      uv venv /tmp/wsp_venv && uv pip install --python /tmp/wsp_venv/bin/python -r requirements-gpu.txt --torch-backend=auto
 
 vllm==0.33.0
 torch==2.14.0

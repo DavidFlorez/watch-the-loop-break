@@ -68,15 +68,25 @@ python3 -m venv .venv
 
 ---
 
-## Run on a Free GPU (Kaggle T4 x2 / Google Colab T4)
+## Run on Cloud GPU (Google Cloud GCE L4/T4, Kaggle T4 x2, or Google Colab)
 
 To sweep larger thinking budgets (`8192`, `16384`, and optional `32768` tokens) with **vLLM (`0.33.0`)**:
 
-1. **Open [`notebooks/gpu_sweep.ipynb`](notebooks/gpu_sweep.ipynb)** in **Kaggle** (`GPU T4 x2`, Internet enabled) or **Google Colab** (`T4` GPU). *(Requires NVIDIA compute capability `>= 7.5`; P100 `6.0` is blocked automatically.)*
-2. **Install GPU dependencies only**: Run Step 1 to install [`requirements-gpu.txt`](requirements-gpu.txt) (`vllm==0.33.0`, `torch==2.14.0`, `transformers>=5.16.1,<5.21.0`). **Do NOT install `requirements.txt` on GPU**—its pinned `transformers==5.21.0` and `torch==2.14.1` conflict with `vllm==0.33.0`.
-3. **Run the FP16 vs. FP32 smoke test**: Step 3 runs [`gpu/smoke_test.py`](gpu/smoke_test.py) across 8 MATH-500 problems (`seed=0`, `temperature=0`, `max_tokens=1024`) in both `float16` and `float32`, automatically selecting `float16` only if zero NaN/corruption artifacts occur and greedy 128-token prefixes agree on $\ge 6/8$ prompts (otherwise falling back to `float32`).
-4. **Run the two-pass sweep & aggregate**: Step 4 builds temporary blended safetensors checkpoints in scratch (`/kaggle/tmp` or `/content/tmp`) via [`gpu/make_ckpt.py`](gpu/make_ckpt.py), evaluates Pass 1 (`budget` tokens) + Pass 2 forced `</think>` answer continuation (`512` tokens) via [`gpu/vllm_sweep.py`](gpu/vllm_sweep.py) (parallelizing 2 alphas on Kaggle `T4 x2` and cleaning up each checkpoint immediately), and aggregates cross-budget charts into `assets/budget_curve_gpu.png` via [`gpu/aggregate.py`](gpu/aggregate.py).
+### Option A: One-Command Google Cloud Ephemeral GPU (`gpu/gcp_run.py`)
+Spins up a Spot **NVIDIA L4** (`g2-standard-4`, 24 GB VRAM, native **`bfloat16`**) or **NVIDIA T4** (`n1-standard-4`, automatic fallback if L4 quota is 0) in your GCP project, installs `vLLM` into an isolated `uv` virtualenv (`--torch-backend=auto`), streams logs live, syncs completed results into `assets/` and `NOTES.md`, and **auto-deletes the VM** immediately on exit (enforced both by `finally:` cleanup and GCP's `--max-run-duration` server-side timer):
 
-> **Important `fp16` Caveat on T4 GPUs**: `Qwen/Qwen3.5-0.8B` weights are natively `bfloat16`, whereas Turing **T4** (`sm_75`) lacks hardware `bfloat16` tensor cores. Because `float16` has a narrower exponent range (`65,504` max vs. `3.4e38` in `bfloat16`), long GatedDeltaNet reasoning traces can occasionally overflow or drift in `fp16`. [`gpu/vllm_sweep.py`](gpu/vllm_sweep.py) forces `mamba_ssm_cache_dtype="float32"`, and [`gpu/smoke_test.py`](gpu/smoke_test.py) gates `float16` vs. `float32` before any full sweep runs.
+```bash
+# Preview VM zone, GPU selection, and remote commands without spending anything:
+.venv/bin/python gpu/gcp_run.py --project YOUR_GCP_PROJECT_ID --dry-run
+
+# Launch the full 8k + 16k sweep on Spot L4 (auto-fallback to T4) and auto-delete VM on completion:
+.venv/bin/python gpu/gcp_run.py --project YOUR_GCP_PROJECT_ID
+```
+
+### Option B: Notebook Runner (`notebooks/gpu_sweep.ipynb` on Colab / Kaggle)
+1. **Open [`notebooks/gpu_sweep.ipynb`](notebooks/gpu_sweep.ipynb)** in **Kaggle** (`GPU T4 x2`, Internet enabled) or **Google Colab** (`T4` or `L4` GPU). *(Requires NVIDIA compute capability `>= 7.5`; P100 `6.0` is blocked automatically.)*
+2. **Isolated `uv` GPU Environment**: Step 1 installs [`requirements-gpu.txt`](requirements-gpu.txt) into an isolated virtual environment (`/tmp/wsp_venv` or `/kaggle/tmp/wsp_venv`) via `uv pip install --torch-backend=auto`, avoiding Colab's preloaded `torch`/`protobuf` conflicts without restarting the kernel. **Do NOT install `requirements.txt` on GPU.**
+3. **Numerical Smoke Gate**: Step 3 runs [`gpu/smoke_test.py`](gpu/smoke_test.py) across 8 MATH-500 problems (`seed=0`, `temperature=0`, `max_tokens=1024`) — validating native **`bfloat16`** directly on `L4`/`A100` (`CC >= 8.0`) or gating **`float16` vs. `float32`** on `T4` (`CC 7.5`).
+4. **Two-Pass Sweep & Aggregation**: Step 4 builds temporary blended safetensors checkpoints in scratch (`/tmp` or `/kaggle/tmp`) via [`gpu/make_ckpt.py`](gpu/make_ckpt.py), evaluates Pass 1 (`budget` tokens) + Pass 2 forced `</think>` answer continuation (`512` tokens) via [`gpu/vllm_sweep.py`](gpu/vllm_sweep.py), and aggregates cross-budget charts into `assets/budget_curve_gpu.png` via [`gpu/aggregate.py`](gpu/aggregate.py).
 
 See [`NOTES.md`](NOTES.md) for the full build log, setup details, experimental measurements, surprises, and next steps.

@@ -36,6 +36,7 @@ from gpu.common import (
     make_scratch_ckpt_dir,
     make_tokens_prompt,
     release_vllm_engine,
+    supports_native_bfloat16,
     utc_now_iso,
 )
 from gpu.make_ckpt import build_checkpoint
@@ -81,10 +82,11 @@ def resolve_dtype_choice(
     dtype_arg: str,
     out_root: Union[str, Path],
     gpu_tag: str,
+    native_bf16_override: Optional[bool] = None,
 ) -> str:
-    """Resolve `--dtype` (`float16`, `float32`, or `auto` via `assets/gpu_smoke_<gpu>.json`)."""
-    choice = (dtype_arg or "float16").strip().lower()
-    if choice in ("float16", "float32"):
+    """Resolve `--dtype` (`bfloat16`, `float16`, `float32`, or `auto` via smoke JSON / GPU CC)."""
+    choice = (dtype_arg or "auto").strip().lower()
+    if choice in ("bfloat16", "float16", "float32"):
         return choice
     if choice == "auto":
         smoke_path = Path(out_root) / f"gpu_smoke_{gpu_tag}.json"
@@ -92,15 +94,22 @@ def resolve_dtype_choice(
             with open(smoke_path, "r", encoding="utf-8") as f:
                 smoke_data = json.load(f)
             rec = smoke_data.get("recommended_dtype")
-            if rec in ("float16", "float32"):
+            if rec in ("bfloat16", "float16", "float32"):
                 print(f"[vLLM Sweep] Resolved dtype='{rec}' from {smoke_path}", flush=True)
                 return rec
+        has_bf16 = bool(native_bf16_override) if native_bf16_override is not None else supports_native_bfloat16()
+        if has_bf16:
+            print(
+                f"[vLLM Sweep] Native bfloat16 supported (CC >= 8.0) and no smoke file at {smoke_path}; using dtype='bfloat16'",
+                flush=True,
+            )
+            return "bfloat16"
         print(
             f"[vLLM Sweep] Warning: {smoke_path} not found or incomplete; defaulting dtype='float32'",
             flush=True,
         )
         return "float32"
-    raise ValueError(f"Unsupported dtype '{dtype_arg}'; expected float16, float32, or auto.")
+    raise ValueError(f"Unsupported dtype '{dtype_arg}'; expected bfloat16, float16, float32, or auto.")
 
 
 def _make_sampling_params(
@@ -672,9 +681,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float16",
-        choices=("float16", "float32", "auto"),
-        help="vLLM model dtype (default: float16; or 'auto' from smoke test JSON).",
+        default="auto",
+        choices=("bfloat16", "float16", "float32", "auto"),
+        help="vLLM model dtype (default: auto via smoke JSON / CC >= 8.0 bfloat16).",
     )
     parser.add_argument("--gpu-tag", type=str, default=None, help="Override GPU tag (e.g. 't4').")
     parser.add_argument("--out-root", type=str, default="assets", help="Root assets directory (default: assets).")
