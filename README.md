@@ -65,7 +65,7 @@ Joining [`assets/gpu_dose_n100/`](assets/gpu_dose_n100/) ($\alpha \in \{0.5, 0.7
 | **1.25** | $7.5\times$ | **46.0%** | 20.0% | 10.0% | 24.0% | 22.0% (10 + 12) | 47.0% | 73.0% | 23,294.5 | 13.58% | 489.41s | 4,625.6 | +40.0 pp ($p < 10^{-6}$) |
 | **1.50** | $9.0\times$ | **40.0%** | **32.0%** | **8.0%** | 20.0% | **17.0%** (8 + 9) | 42.0% | 71.0% | **20,469.0** | **12.18%** | **450.05s** | 4,618.9 | +34.0 pp ($p < 10^{-6}$) |
 
-- **Monotonic Loop Reduction vs. Rising Wrong-Answer Completion**: Stronger projection cuts loops monotonically (`91.0% → 72.0% → 58.0% → 33.0% → 22.0% → 17.0%`), keeps cap hits **non-increasing** (`94.0% → 63.0% → 39.0% → 34.0% → 34.0% → 28.0%` — flat at `34.0%` for `α = 1.0` and `1.25`), and shortens median generation length by `12,299` tokens (`32,768.0 → 20,469.0`), while finished-but-wrong responses increase from `0.0%` (`α = 0.0`) and `5.0%` (`α = 0.50`) to **`9.0%` (`α = 0.75`)**, **`21.0%` (`α = 1.0`)**, **`20.0%` (`α = 1.25`)**, and **`32.0%` (`α = 1.50`)**. Pairwise two-sided exact McNemar tests show that **only `α = 0.50 → 0.75` is statistically significant (`32.0% → 52.0%`, `+20.0 pp`, $n_{10}=3, n_{01}=23, p = 0.000088 \approx 0.0001$)**; differences between **`α = 0.75` and `α = 1.0` (`52.0% vs 45.0%`, $n_{10}=12, n_{01}=5, p = 0.14$)** and between **`α = 1.50` and `α = 1.0` (`40.0% vs 45.0%`, $n_{10}=8, n_{01}=13, p = 0.38$)** are **not statistically significant** (`1.0 vs 1.25`: $p = 1.00$; `0.75 vs 1.25`: $p = 0.24$; `0.75 vs 1.5`: $n_{10}=18, n_{01}=6, p = 0.0227$).
+- **Monotonic Loop Reduction vs. Rising Wrong-Answer Completion**: Stronger projection cuts loops monotonically (`91.0% → 72.0% → 58.0% → 33.0% → 22.0% → 17.0%`), keeps cap hits **non-increasing** (`94.0% → 63.0% → 39.0% → 34.0% → 34.0% → 28.0%` — flat at `34.0%` for `α = 1.0` and `1.25`), and shortens median generation length by `12,299` tokens (`32,768.0 → 20,469.0`), while finished-but-wrong responses increase from `0.0%` (`α = 0.0`) and `5.0%` (`α = 0.50`) to **`9.0%` (`α = 0.75`)**, **`21.0%` (`α = 1.0`)**, **`20.0%` (`α = 1.25`)**, and **`32.0%` (`α = 1.50`)**. Pairwise two-sided exact McNemar tests ([`assets/gpu_stats.csv`](assets/gpu_stats.csv)) show that **only `α = 0.50 → 0.75` is statistically significant (`32.0% → 52.0%`, `+20.0 pp`, $n_{11}=29, n_{10}=3, n_{01}=23, p = 0.000088 \approx 0.0001$)**; differences between **`α = 0.75` and `α = 1.0` (`52.0% vs 45.0%`, $n_{11}=40, n_{10}=12, n_{01}=5, p = 0.1435$)** and between **`α = 1.50` and `α = 1.0` (`40.0% vs 45.0%`, $n_{11}=32, n_{10}=8, n_{01}=13, p = 0.3833$)** are **not statistically significant** (`1.0 vs 1.25`: $n_{11}=39, n_{10}=6, n_{01}=7, p = 1.00$; `0.75 vs 1.25`: $n_{11}=40, n_{10}=12, n_{01}=6, p = 0.2379$; `0.75 vs 1.5`: $n_{11}=34, n_{10}=18, n_{01}=6, p = 0.0227$).
 
 ---
 
@@ -101,7 +101,7 @@ Original local Apple M3 (`bfloat16`) 5-dose sweep under a `4,096`-token budget (
 | **1.25** ($1.25\times$ Extrap.) | $7.5\times$ | **6 / 50** | **12.0%** | **88.0% (44/50)** | **3982.9** | 2.69% | 1.35% | 1995.77s |
 | **1.50** (Over-ablation) | $9.0\times$ | 4 / 50 | 8.0% | 92.0% (46/50) | 4019.4 | **2.37%** | **0.74%** | **1890.71s** |
 
-- **Exact 2-Tensor Diff**: Across all `488` tensors (`873,438,784` parameters), **`486` are bit-identical** in `bfloat16`; only `layers.15.mlp.down_proj.weight` ($\sigma_1/\sigma_2 = 1771.2$, `99.99945%` rank-1 energy, `10.64%` Frobenius norm diff) and `layers.19.mlp.down_proj.weight` ($\sigma_1/\sigma_2 = 1552.0$, `99.99914%` rank-1 energy, `8.11%` Frobenius norm diff) differ across 64 columns each (`130,188` non-zero `bfloat16` entries changed across `131,072` column entries = **`0.0150%`** of `873,438,784` checkpoint parameters, rounded to **`0.016%`** of nominal `"0.8 billion"` in Takehi et al., 2026; $\cos(u_{15}, u_{19}) = 0.8490$).
+- **Exact 2-Tensor Diff**: Across all `488` tensors (`873,438,784` parameters), **`486` are bit-identical** in `bfloat16`; only `layers.15.mlp.down_proj.weight` ($\sigma_1/\sigma_2 = 1771.18\times$, `99.99945%` rank-1 energy, `10.64%` Frobenius norm diff) and `layers.19.mlp.down_proj.weight` ($\sigma_1/\sigma_2 = 1552.02\times$, `99.99914%` rank-1 energy, `8.11%` Frobenius norm diff) differ across 64 columns each (`65,260` + `64,928` = `130,188` non-zero `bfloat16` entries changed across `131,072` column entries = **`0.015006%`** of `873,438,784` checkpoint parameters, rounded to **`0.016%`** of nominal `"0.8 billion"` in Takehi et al., 2026; $\cos(u_{15}, u_{19}) = 0.849005$).
 
 ---
 
@@ -131,7 +131,8 @@ Original local Apple M3 (`bfloat16`) 5-dose sweep under a `4,096`-token budget (
 ![Weight Diff Analysis](assets/weight_diff_analysis.png)
 ![Local 4k Alpha Sweep Dashboard](assets/sweep_charts.png)
 ![Token Length vs 8-Gram Repetition Distribution](assets/alpha_token_distributions.png)
-![Side-by-Side Gradio App](assets/app_side_by_side.gif)
+![Side-by-Side Gradio App (1280px Animated Replay GIF)](assets/app_side_by_side.gif)
+![Side-by-Side KaTeX Gradio UI Still (1600px Phone-Readable)](assets/article/mac_app_still.png)
 ![Side-by-Side Gradio Screenshot](assets/app_screenshot.png)
 
 ---
