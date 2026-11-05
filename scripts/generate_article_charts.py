@@ -984,27 +984,27 @@ def generate_hero_trace_chart(
         ax.add_patch(card)
 
         hdr = mpatches.FancyBboxPatch(
-            (x0 + 0.012, 0.865),
+            (x0 + 0.012, 0.868),
             w - 0.024,
-            0.095,
+            0.092,
             boxstyle="round,pad=0.005,rounding_size=0.014",
             facecolor=header_bg,
             edgecolor="none",
         )
         ax.add_patch(hdr)
-        ax.text(x0 + 0.022, 0.928, header_title, fontsize=10.3, fontweight="bold", color=title_col, va="center")
-        ax.text(x0 + 0.022, 0.885, badge_text, fontsize=7.1, fontweight="bold", color="#334155", va="center")
+        ax.text(x0 + 0.022, 0.930, header_title, fontsize=10.2, fontweight="bold", color=title_col, va="center")
+        ax.text(x0 + 0.022, 0.888, badge_text, fontsize=6.65, fontweight="bold", color="#334155", va="center")
 
         bar_x = x0 + 0.022
         bar_w = w - 0.044
-        bar_y = 0.745
-        bar_h = 0.068
+        bar_y = 0.774
+        bar_h = 0.048
 
         ax.text(
             bar_x,
-            bar_y + bar_h + 0.015,
+            bar_y + bar_h + 0.014,
             "Token Budget Timeline (0 → 32,768 tokens, shared scale)",
-            fontsize=8.4,
+            fontsize=8.3,
             fontweight="bold",
             color="#475569",
         )
@@ -1012,6 +1012,7 @@ def generate_hero_trace_chart(
         track = mpatches.Rectangle((bar_x, bar_y), bar_w, bar_h, facecolor="#f1f5f9", edgecolor="#cbd5e1", lw=1.0)
         ax.add_patch(track)
 
+        call_y = 0.742
         if is_base:
             frac_calc = min(1.0, calc28_tok_val / 32768.0)
             frac_pre = min(1.0, onset0_val / 32768.0)
@@ -1029,35 +1030,69 @@ def generate_hero_trace_chart(
                     alpha=0.92,
                 )
             )
-            # Mark token 798 where base wrote \frac{8 \times 7}{2} = 28
             calc_x = bar_x + bar_w * frac_calc
-            ax.plot([calc_x, calc_x], [bar_y, bar_y + bar_h], color="#b45309", lw=1.8, linestyle="--", zorder=5)
-            ax.plot([bar_x + w_pre, bar_x + w_pre], [bar_y, bar_y + bar_h], color="#7f1d1d", lw=2.0, zorder=5)
-            ax.text(
-                bar_x + (w_pre * 0.56),
-                bar_y + bar_h / 2,
-                f"=28 @ {calc28_tok_val}\nLoop @ {onset0_val:,}",
-                ha="center",
-                va="center",
-                fontsize=6.6,
-                fontweight="bold",
-                color="#7f1d1d",
-            )
+            loop_x = bar_x + w_pre
+            ax.plot([calc_x, calc_x], [bar_y - 0.005, bar_y + bar_h + 0.003], color="#b45309", lw=1.8, linestyle="--", zorder=5)
+            ax.plot([loop_x, loop_x], [bar_y - 0.005, bar_y + bar_h + 0.003], color="#7f1d1d", lw=2.0, zorder=5)
+
+            # Wide unclipped dark-red loop pill centered inside the loop bar
             ax.text(
                 bar_x + w_pre + w_loop / 2,
                 bar_y + bar_h / 2,
-                f"Looped tok {onset0_val:,}→{tok0:,} ({repeat_cnt:,}× line repeats)",
+                f"Looped tok {onset0_val:,} → {tok0:,} ({repeat_cnt:,}× repeats)",
                 ha="center",
                 va="center",
-                fontsize=7.7,
+                fontsize=7.55,
                 fontweight="bold",
                 color="#ffffff",
-                bbox=dict(boxstyle="round,pad=0.18", facecolor="#991b1b", edgecolor="none", alpha=0.92),
+                bbox=dict(boxstyle="round,pad=0.22", facecolor="#991b1b", edgecolor="none", alpha=0.94),
+            )
+
+            # Wide unclipped callout pills below the timeline bar with crisp leader ticks to tok 798 and tok 5,120
+            lbl1_x = bar_x + 0.004
+            ax.text(
+                lbl1_x,
+                call_y,
+                f"=28 computed @ tok {calc28_tok_val:,}",
+                ha="left",
+                va="center",
+                fontsize=6.7,
+                fontweight="bold",
+                color="#92400e",
+                bbox=dict(boxstyle="round,pad=0.22", facecolor="#fffbeb", edgecolor="#d97706", lw=0.9),
+            )
+            ax.plot([calc_x, lbl1_x + 0.045], [bar_y - 0.005, call_y + 0.015], color="#d97706", lw=1.1, zorder=4)
+
+            lbl2_x = bar_x + 0.172
+            ax.text(
+                lbl2_x,
+                call_y,
+                f"Loop onset @ tok {onset0_val:,}",
+                ha="left",
+                va="center",
+                fontsize=6.7,
+                fontweight="bold",
+                color="#7f1d1d",
+                bbox=dict(boxstyle="round,pad=0.22", facecolor="#fef2f2", edgecolor="#dc2626", lw=0.9),
+            )
+            ax.plot([loop_x, lbl2_x + 0.035], [bar_y - 0.005, call_y + 0.015], color="#dc2626", lw=1.1, zorder=4)
+
+            ax.text(
+                bar_x + bar_w,
+                call_y,
+                f"{tok0:,} (Cap)",
+                ha="right",
+                va="center",
+                fontsize=6.7,
+                fontweight="bold",
+                color="#991b1b",
             )
         else:
             frac_used = min(1.0, tok1 / 32768.0)
             w_used = max(bar_w * frac_used, bar_w * 0.08)
+            end_x = bar_x + w_used
             ax.add_patch(mpatches.Rectangle((bar_x, bar_y), w_used, bar_h, facecolor="#059669", edgecolor="none"))
+            ax.plot([end_x, end_x], [bar_y - 0.005, bar_y + bar_h + 0.003], color="#047857", lw=1.8, zorder=5)
             unused_center_x = bar_x + w_used + (bar_w - w_used) * 0.5
             ax.text(
                 unused_center_x,
@@ -1065,9 +1100,33 @@ def generate_hero_trace_chart(
                 f"Solved in {tok1:,} tok — {32768 - tok1:,} saved ({100*(1-frac_used):.1f}% free)",
                 ha="center",
                 va="center",
-                fontsize=7.9,
+                fontsize=7.8,
                 fontweight="bold",
                 color="#065f46",
+            )
+            lbl_ok_x = bar_x + 0.004
+            ax.text(
+                lbl_ok_x,
+                call_y,
+                f"Finished </think> & \\boxed{{28}} @ tok {tok1:,}",
+                ha="left",
+                va="center",
+                fontsize=6.7,
+                fontweight="bold",
+                color="#065f46",
+                bbox=dict(boxstyle="round,pad=0.22", facecolor="#ecfdf5", edgecolor="#059669", lw=0.9),
+                parse_math=False,
+            )
+            ax.plot([end_x, lbl_ok_x + 0.065], [bar_y - 0.005, call_y + 0.015], color="#059669", lw=1.1, zorder=4)
+            ax.text(
+                bar_x + bar_w,
+                call_y,
+                "32,768 budget",
+                ha="right",
+                va="center",
+                fontsize=6.7,
+                fontweight="bold",
+                color="#64748b",
             )
 
         box_y = 0.21
@@ -1461,7 +1520,7 @@ def generate_outcomes_32k_single_chart(
         n_val = int(df_use["n_total"].max()) if not df_use.empty else 200
         title_str = f"32,768-Token Outcomes on Core Cohort (N = {n_val})"
         subtitle_str = (
-            "Looping drops from 89.5% (α = 0.0) to 29.5% (α = 1.25) as strict boxed accuracy jumps 8.5% → 48.5–51.5%"
+            "Looping drops from 89.5% to 25.5%; cap hits from 91.5% to 29.5%"
         )
 
     target = Path(out_path) if out_path is not None else default_out
@@ -1501,7 +1560,7 @@ def generate_outcomes_32k_single_chart(
         color="#0f172a",
         y=0.972,
     )
-    fig.text(
+    sub_t = fig.text(
         0.5,
         0.892,
         subtitle_str,
@@ -1512,6 +1571,12 @@ def generate_outcomes_32k_single_chart(
     )
 
     fig.subplots_adjust(left=0.09, right=0.975, top=0.720, bottom=0.145)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    max_sub_w = fig.get_window_extent(renderer=renderer).width * 0.92
+    sub_bb = sub_t.get_window_extent(renderer=renderer)
+    if sub_bb.width > max_sub_w:
+        sub_t.set_fontsize(sub_t.get_fontsize() * (max_sub_w / sub_bb.width))
     fig.savefig(target, dpi=DPI, bbox_inches=None)
     plt.close(fig)
     return str(target)
