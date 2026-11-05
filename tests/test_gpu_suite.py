@@ -638,11 +638,24 @@ class TestLoopOnsetMcNemarAndPaperReference(unittest.TestCase):
             summary = generate_all_charts(assets_root=tmp_path, article_dir=tmp_path / "article", with_tokenizer=False)
             self.assertEqual(summary["n_core"], 200)
             self.assertGreater(summary["stats_rows"], 0)
+            expected_charts = {
+                "cover_5x2": (1500, 600),
+                "headline_budget_curve": (1600, 1000),
+                "headline_budget_curve_full": (1600, 1000),
+                "hero_trace": (1600, 1000),
+                "outcomes_32k": (1600, 1000),
+                "outcomes_32k_core": (1600, 1000),
+                "outcomes_dose": (1600, 1000),
+                "loop_onset": (1600, 1000),
+                "loop_onset_full": (1600, 1000),
+                "edit_diagram": (1600, 1000),
+            }
+            self.assertEqual(set(summary["article_charts"].keys()), set(expected_charts.keys()))
             for name, path_str in summary["article_charts"].items():
                 p = Path(path_str)
                 self.assertTrue(p.is_file(), f"Missing chart {name}")
                 with Image.open(p) as im:
-                    self.assertEqual(im.size[0], 1600, f"{name} width expected 1600px, got {im.size}")
+                    self.assertEqual(im.size, expected_charts[name], f"{name} size mismatch: got {im.size}")
 
 
 if __name__ == "__main__":
