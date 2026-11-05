@@ -5,13 +5,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -146,6 +150,7 @@ def build_colab_shell_script(
     smoke_only: bool,
     include_4k: bool = False,
     include_32k: bool = False,
+    skip_smoke: bool = False,
     out_root: str = "assets",
     seed_jsonl: Optional[str] = None,
     derive_budgets: Sequence[int] = (),
@@ -191,6 +196,19 @@ def build_colab_shell_script(
         agg_step = f"""
 echo "=== [WSP Colab] Aggregating cross-budget results ==="
 "$VENV_PY" -u gpu/aggregate.py --out-root {out_q} --notes NOTES.md
+"""
+
+    smoke_section = ""
+    if smoke_only or not skip_smoke:
+        smoke_section = f"""
+echo "=== [WSP Colab] Running smoke test on N=8 MATH-500 problems ==="
+"$VENV_PY" -u gpu/smoke_test.py \\
+  --n 8 \\
+  --max-tokens 1024 \\
+  --seed {int(seed)} \\
+  --out-root {out_q} \\
+  --gpu-mem {float(gpu_mem)} \\
+  {eager_flag}
 """
 
     sweep_section = ""
@@ -269,62 +287,30 @@ if ! command -v nvcc >/dev/null 2>&1; then
 fi
 
 "$VENV_PY" -c "import shutil, torch, vllm, transformers, math_verify; print('[WSP Colab] Verified vllm=' + vllm.__version__ + ', torch=' + torch.__version__ + ', transformers=' + transformers.__version__ + ', cuda=' + str(torch.cuda.is_available()) + ', ninja=' + str(shutil.which('ninja')) + ', nvcc=' + str(shutil.which('nvcc')))"
-
-echo "=== [WSP Colab] Running smoke test on N=8 MATH-500 problems ==="
-"$VENV_PY" -u gpu/smoke_test.py \\
-  --n 8 \\
-  --max-tokens 1024 \\
-  --seed {int(seed)} \\
-  --out-root {out_q} \\
-  --gpu-mem {float(gpu_mem)} \\
-  {eager_flag}
-{sweep_section}
+{smoke_section}{sweep_section}
 echo "=== [WSP Colab] Remote bash script finished at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 """
 
 
-def build_colab_remote_driver() -> str:
-    """Return Python driver script run on the remote Colab kernel via `colab exec -f`.
+_REMOTE_SUPERVISOR_SOURCE = r'''from __future__ import annotations
 
-    Unpacks `/content/wsp_bundle.tar.gz` into `/content/wsp`, streams `/content/wsp/repo/run_remote.sh`
-    line-by-line with a 60s idle heartbeat, and packages safe results into chunked archives
-    (`/content/wsp_out_summary.tar.gz` + per-budget `/content/wsp_out_budget_<B>.tar.gz`) in `finally:`.
-    """
-    return r"""from __future__ import annotations
-
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tarfile
-import threading
-import time
 from pathlib import Path
 
-BUNDLE_PATH = Path("/content/wsp_bundle.tar.gz")
 WSP_ROOT = Path("/content/wsp")
 REPO_DIR = WSP_ROOT / "repo"
+RC_PATH = WSP_ROOT / "runner.rc"
+RC_TMP_PATH = WSP_ROOT / "runner.rc.tmp"
 
 FORBIDDEN_EXTS = (".safetensors", ".pt", ".bin", ".ckpt")
 PROTECTED_N50_RE = re.compile(
     r"^assets/(?:budget_(?:4096|8192|16384|32768)/gpu-rtx-pro-6000-bfloat16/|sweep_results\.csv$)"
 )
-
-
-def _safe_extract_tar(src_tar: Path, dst_dir: Path) -> None:
-    dst_resolved = dst_dir.resolve()
-    dst_resolved.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(src_tar, "r:gz") as tf:
-        for member in tf.getmembers():
-            if not member.name or member.name.startswith("/") or "\\" in member.name:
-                raise ValueError(f"Unsafe tar member path: {member.name!r}")
-            target = (dst_resolved / member.name).resolve()
-            if target != dst_resolved and not str(target).startswith(str(dst_resolved) + os.sep):
-                raise ValueError(f"Tar path traversal blocked: {member.name!r}")
-            if member.issym() or member.islnk():
-                raise ValueError(f"Refusing symlink/hardlink in tar: {member.name!r}")
-        tf.extractall(dst_resolved)
 
 
 def _is_packageable_file(path: Path, repo_dir: Path) -> bool:
@@ -342,6 +328,8 @@ def _is_packageable_file(path: Path, repo_dir: Path) -> bool:
 
 
 def _package_results(repo_dir: Path) -> list[str]:
+    import tarfile
+
     created: list[str] = []
     if not repo_dir.is_dir():
         return created
@@ -388,72 +376,193 @@ def _package_results(repo_dir: Path) -> list[str]:
 
 
 def main() -> None:
+    runner_sh = REPO_DIR / "run_remote.sh"
+    ret_code = 1
+    archives: list[str] = []
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(runner_sh)],
+            cwd=str(REPO_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=sys.stdout,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        ret_code = proc.wait()
+    except Exception as exc:
+        sys.stdout.write(f"[WSP Colab] Supervisor caught exception: {exc}\n")
+        sys.stdout.flush()
+    finally:
+        shutil.rmtree(WSP_ROOT / "ckpt", ignore_errors=True)
+        shutil.rmtree(WSP_ROOT / "hf_cache", ignore_errors=True)
+        archives = _package_results(REPO_DIR)
+        sys.stdout.write(f"[WSP Colab] Packaged result archives: {archives}\n")
+        sys.stdout.flush()
+        RC_TMP_PATH.write_text(
+            json.dumps({"returncode": int(ret_code), "archives": archives}),
+            encoding="utf-8",
+        )
+        os.replace(RC_TMP_PATH, RC_PATH)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+_REMOTE_TAILER_HELPERS = r'''def _stream_log_slice(start_offset: int, slice_timeout_s: int) -> None:
+    log_path = WSP_ROOT / "runner.log"
+    rc_path = WSP_ROOT / "runner.rc"
+    pos = max(0, int(start_offset))
+    slice_start = time.monotonic()
+    last_emit = slice_start
+
+    while True:
+        if log_path.is_file():
+            with open(log_path, "rb") as fh:
+                fh.seek(pos)
+                chunk = fh.read()
+                if chunk:
+                    pos += len(chunk)
+                    sys.stdout.write(chunk.decode("utf-8", errors="replace"))
+                    sys.stdout.flush()
+                    last_emit = time.monotonic()
+
+        if rc_path.is_file():
+            # Drain any trailing bytes written right before runner.rc appeared
+            if log_path.is_file():
+                with open(log_path, "rb") as fh:
+                    fh.seek(pos)
+                    tail = fh.read()
+                    if tail:
+                        pos += len(tail)
+                        sys.stdout.write(tail.decode("utf-8", errors="replace"))
+                        sys.stdout.flush()
+            try:
+                rc_info = json.loads(rc_path.read_text(encoding="utf-8"))
+                rc_val = int(rc_info.get("returncode", 1))
+            except Exception:
+                rc_val = 1
+            sys.stdout.write(f"\n[WSP_SLICE_STATE]=DONE offset={pos} rc={rc_val}\n")
+            sys.stdout.flush()
+            return
+
+        now = time.monotonic()
+        if now - last_emit >= 20.0:
+            sys.stdout.write(f"[WSP Colab] heartbeat: remote sweep running (offset={pos})\n")
+            sys.stdout.flush()
+            last_emit = now
+
+        if now - slice_start >= float(slice_timeout_s):
+            sys.stdout.write(f"\n[WSP_SLICE_STATE]=CONTINUE offset={pos} rc=-1\n")
+            sys.stdout.flush()
+            return
+
+        time.sleep(0.25)
+'''
+
+
+def build_colab_remote_driver(slice_timeout_s: int = 300) -> str:
+    """Return initial remote Python driver run via `colab exec -f`.
+
+    Unpacks `/content/wsp_bundle.tar.gz`, starts a detached supervisor running
+    `/content/wsp/repo/run_remote.sh` into `/content/wsp/runner.log` (and packaging
+    safe results on completion), and streams the first WebSocket slice.
+    """
+    return (
+        "from __future__ import annotations\n\n"
+        "import json\n"
+        "import os\n"
+        "import shutil\n"
+        "import subprocess\n"
+        "import sys\n"
+        "import tarfile\n"
+        "import time\n"
+        "from pathlib import Path\n\n"
+        'BUNDLE_PATH = Path("/content/wsp_bundle.tar.gz")\n'
+        'WSP_ROOT = Path("/content/wsp")\n'
+        'REPO_DIR = WSP_ROOT / "repo"\n'
+        f"SUPERVISOR_CODE = {_REMOTE_SUPERVISOR_SOURCE!r}\n\n"
+        + _REMOTE_TAILER_HELPERS
+        + f"""
+
+def _safe_extract_tar(src_tar: Path, dst_dir: Path) -> None:
+    dst_resolved = dst_dir.resolve()
+    dst_resolved.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(src_tar, "r:gz") as tf:
+        for member in tf.getmembers():
+            if not member.name or member.name.startswith("/") or "\\\\" in member.name:
+                raise ValueError(f"Unsafe tar member path: {{member.name!r}}")
+            target = (dst_resolved / member.name).resolve()
+            if target != dst_resolved and not str(target).startswith(str(dst_resolved) + os.sep):
+                raise ValueError(f"Tar path traversal blocked: {{member.name!r}}")
+            if member.issym() or member.islnk():
+                raise ValueError(f"Refusing symlink/hardlink in tar: {{member.name!r}}")
+        tf.extractall(dst_resolved)
+
+
+def main() -> None:
     for old in Path("/content").glob("wsp_out*.tar.gz"):
         old.unlink(missing_ok=True)
+    for old_meta in ("runner.log", "runner.rc", "runner.rc.tmp", "supervisor.py"):
+        (WSP_ROOT / old_meta).unlink(missing_ok=True)
     if REPO_DIR.exists():
         shutil.rmtree(REPO_DIR, ignore_errors=True)
     shutil.rmtree(WSP_ROOT / "ckpt", ignore_errors=True)
 
     if not BUNDLE_PATH.is_file():
-        raise FileNotFoundError(f"Upload bundle not found at {BUNDLE_PATH}")
+        raise FileNotFoundError(f"Upload bundle not found at {{BUNDLE_PATH}}")
 
     _safe_extract_tar(BUNDLE_PATH, WSP_ROOT)
     BUNDLE_PATH.unlink(missing_ok=True)
 
     runner_sh = REPO_DIR / "run_remote.sh"
     if not runner_sh.is_file():
-        raise FileNotFoundError(f"Expected {runner_sh} after unpacking bundle")
+        raise FileNotFoundError(f"Expected {{runner_sh}} after unpacking bundle")
 
-    last_output_ts = time.monotonic()
-    start_ts = last_output_ts
-    stop_event = threading.Event()
-
-    def _heartbeat() -> None:
-        while not stop_event.wait(30.0):
-            now = time.monotonic()
-            if now - last_output_ts >= 55.0:
-                elapsed = int(now - start_ts)
-                sys.stdout.write(f"[WSP Colab] heartbeat: remote sweep running (elapsed={elapsed}s)\\n")
-                sys.stdout.flush()
-
-    hb = threading.Thread(target=_heartbeat, daemon=True)
-    hb.start()
-
-    ret_code = 1
+    sup_path = WSP_ROOT / "supervisor.py"
+    sup_path.write_text(SUPERVISOR_CODE, encoding="utf-8")
+    log_fh = open(WSP_ROOT / "runner.log", "w", encoding="utf-8", buffering=1)
     try:
-        proc = subprocess.Popen(
-            ["bash", str(runner_sh)],
-            cwd=str(REPO_DIR),
-            stdout=subprocess.PIPE,
+        subprocess.Popen(
+            [sys.executable, "-u", str(sup_path)],
+            cwd=str(WSP_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            start_new_session=True,
+            close_fds=True,
         )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            last_output_ts = time.monotonic()
-            sys.stdout.write(line)
-            sys.stdout.flush()
-        ret_code = proc.wait()
     finally:
-        stop_event.set()
-        shutil.rmtree(WSP_ROOT / "ckpt", ignore_errors=True)
-        shutil.rmtree(WSP_ROOT / "hf_cache", ignore_errors=True)
-        archives = _package_results(REPO_DIR)
-        sys.stdout.write(f"[WSP Colab] Packaged result archives: {archives}\\n")
-        sys.stdout.flush()
+        log_fh.close()
 
-    if ret_code != 0:
-        sys.stdout.write(f"[WSP_COLAB_EXIT_CODE]={ret_code}\\n")
-        sys.stdout.flush()
-        raise RuntimeError(f"Remote bash script exited with code {ret_code}")
-    sys.stdout.write("[WSP_COLAB_EXIT_CODE]=0\\n")
-    sys.stdout.flush()
+    _stream_log_slice(start_offset=0, slice_timeout_s={int(slice_timeout_s)})
 
 
 if __name__ == "__main__":
     main()
 """
+    )
+
+
+def build_colab_poll_driver(start_offset: int, slice_timeout_s: int = 300) -> str:
+    """Return follow-up remote driver that tails `/content/wsp/runner.log` from `start_offset`."""
+    return (
+        "from __future__ import annotations\n\n"
+        "import json\n"
+        "import sys\n"
+        "import time\n"
+        "from pathlib import Path\n\n"
+        'WSP_ROOT = Path("/content/wsp")\n\n'
+        + _REMOTE_TAILER_HELPERS
+        + f"""
+
+if __name__ == "__main__":
+    _stream_log_slice(start_offset={max(0, int(start_offset))}, slice_timeout_s={int(slice_timeout_s)})
+"""
+    )
+
 
 
 def extract_tar_safely(archive_path: Path, staging_dir: Path) -> None:
@@ -546,6 +655,202 @@ def _collect_extra_bundle_files(
     return extras
 
 
+_SLICE_STATE_RE = re.compile(
+    r"\[WSP_SLICE_STATE\]=(DONE|CONTINUE)\s+offset=(\d+)\s+rc=(-?\d+)\s*$"
+)
+
+
+def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
+    """Terminate (and if needed SIGKILL) a child process and its process group."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except Exception:
+        pgid = None
+
+    if proc.poll() is None:
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=3.0)
+        except Exception:
+            try:
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=3.0)
+            except Exception:
+                pass
+
+
+def _run_single_exec_slice(
+    *,
+    session_name: str,
+    script_path: Path,
+    env: Dict[str, str],
+    slice_exec_timeout_s: int,
+    line_inactivity_s: float = 85.0,
+) -> tuple[Optional[str], int, int, bool]:
+    """Run one `colab exec` slice with an inactivity watchdog against hung WebSockets."""
+    exec_cmd = [
+        "colab",
+        "--auth=oauth2",
+        "exec",
+        "--session",
+        session_name,
+        "--file",
+        str(script_path),
+        "--timeout",
+        str(slice_exec_timeout_s),
+    ]
+    exec_proc = subprocess.Popen(
+        exec_cmd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+    assert exec_proc.stdout is not None
+
+    line_q: queue.Queue[Optional[str]] = queue.Queue()
+
+    def _reader() -> None:
+        assert exec_proc.stdout is not None
+        try:
+            for raw in exec_proc.stdout:
+                line_q.put(raw)
+        finally:
+            line_q.put(None)
+
+    reader_t = threading.Thread(target=_reader, daemon=True)
+    reader_t.start()
+
+    slice_state: Optional[str] = None
+    offset = -1
+    rc = -1
+    stalled = False
+
+    while True:
+        try:
+            item = line_q.get(timeout=line_inactivity_s)
+        except queue.Empty:
+            stalled = True
+            _terminate_process_group(exec_proc)
+            return slice_state, offset, rc, True
+
+        if item is None:
+            break
+
+        clean = item.rstrip("\n")
+        match = _SLICE_STATE_RE.search(clean.strip())
+        if match:
+            slice_state = match.group(1)
+            offset = int(match.group(2))
+            rc = int(match.group(3))
+            prefix = clean[: match.start()].rstrip()
+            if prefix:
+                print(prefix, flush=True)
+        else:
+            print(clean, flush=True)
+
+    proc_rc = exec_proc.wait()
+    if slice_state == "DONE":
+        return slice_state, offset, rc, False
+    if slice_state == "CONTINUE":
+        return slice_state, offset, -1, False
+    return None, offset, proc_rc, stalled
+
+
+def _execute_colab_detached(
+    *,
+    safe_session: str,
+    tmp_path: Path,
+    initial_driver_path: Path,
+    colab_env: Dict[str, str],
+    total_timeout_s: int,
+    slice_timeout_s: int = 300,
+) -> tuple[int, bool]:
+    """Execute remote driver via resilient 5-minute WebSocket slices with reconnect."""
+    deadline = time.monotonic() + float(total_timeout_s)
+    stream_offset = 0
+    slice_idx = 0
+    consecutive_disconnects = 0
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"Colab remote execution exceeded overall timeout of {total_timeout_s}s "
+                f"(last log offset={stream_offset})."
+            )
+
+        this_slice_s = min(int(slice_timeout_s), max(30, int(remaining)))
+        this_exec_timeout_s = this_slice_s + 180
+
+        if slice_idx == 0:
+            script_path = initial_driver_path
+        else:
+            script_path = tmp_path / f"colab_poll_{slice_idx}.py"
+            script_path.write_text(
+                build_colab_poll_driver(
+                    start_offset=stream_offset, slice_timeout_s=this_slice_s
+                ),
+                encoding="utf-8",
+            )
+
+        slice_state, new_offset, rc, stalled = _run_single_exec_slice(
+            session_name=safe_session,
+            script_path=script_path,
+            env=colab_env,
+            slice_exec_timeout_s=this_exec_timeout_s,
+        )
+        if new_offset >= 0:
+            stream_offset = max(stream_offset, new_offset)
+
+        if slice_state == "DONE":
+            return int(rc), (int(rc) == 0)
+
+        if slice_state == "CONTINUE":
+            consecutive_disconnects = 0
+            slice_idx += 1
+            continue
+
+        # WebSocket dropped or stalled before slice completion: check whether VM is still alive
+        active_lines = list_active_sessions(env=colab_env)
+        if not session_exists(safe_session, active_lines):
+            raise RuntimeError(
+                f"Colab session '{safe_session}' was terminated or preempted on server "
+                f"(last streamed log offset={stream_offset})."
+            )
+
+        consecutive_disconnects += 1
+        if consecutive_disconnects > 12:
+            raise RuntimeError(
+                f"Colab session '{safe_session}' lost WebSocket stream {consecutive_disconnects} "
+                f"consecutive times (last streamed log offset={stream_offset})."
+            )
+
+        reason = "stalled" if stalled else "closed prematurely"
+        print(
+            f"[Colab] WebSocket {reason} while VM '{safe_session}' is still active; "
+            f"reconnecting at log offset {stream_offset} (attempt {consecutive_disconnects}/12) ...",
+            flush=True,
+        )
+        time.sleep(3.0)
+        slice_idx = max(1, slice_idx + 1)
+
+
 def run_on_colab(
     *,
     gpu: str = DEFAULT_COLAB_GPU,
@@ -556,6 +861,7 @@ def run_on_colab(
     budgets: Sequence[int] = (8192, 16384),
     include_4k: bool = False,
     include_32k: bool = False,
+    skip_smoke: bool = False,
     alphas: Sequence[float] = (0.0, 1.0, 1.25),
     n_problems: int = 50,
     samples: int = 1,
@@ -593,6 +899,7 @@ def run_on_colab(
         gpu_mem=gpu_mem,
         enforce_eager=enforce_eager,
         smoke_only=smoke_only,
+        skip_smoke=skip_smoke,
         out_root=out_root,
         seed_jsonl=seed_jsonl,
         derive_budgets=derive_budgets,
@@ -720,39 +1027,16 @@ def run_on_colab(
             )
 
             print(
-                f"[Colab] Executing remote setup & vLLM sweep (timeout={timeout_s}s, streaming live) ...",
+                f"[Colab] Executing remote setup & vLLM sweep (timeout={timeout_s}s, sliced WebSocket streaming) ...",
                 flush=True,
             )
-            exec_cmd = [
-                "colab",
-                "--auth=oauth2",
-                "exec",
-                "--session",
-                safe_session,
-                "--file",
-                str(driver_path),
-                "--timeout",
-                str(timeout_s),
-            ]
-            exec_proc = subprocess.Popen(
-                exec_cmd,
-                env=colab_env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+            exec_ret, saw_clean_sentinel = _execute_colab_detached(
+                safe_session=safe_session,
+                tmp_path=tmp_path,
+                initial_driver_path=driver_path,
+                colab_env=colab_env,
+                total_timeout_s=timeout_s,
             )
-            assert exec_proc.stdout is not None
-            saw_clean_sentinel = False
-            for line in exec_proc.stdout:
-                clean = line.rstrip("\n")
-                if clean.strip() == "[WSP_COLAB_EXIT_CODE]=0" or clean.endswith(
-                    "\\n[WSP_COLAB_EXIT_CODE]=0"
-                ):
-                    saw_clean_sentinel = True
-                print(clean, flush=True)
-            exec_ret = exec_proc.wait()
 
             # Discover & download packaged archives even if a later step failed partway through
             ls_res = _run_colab(
@@ -936,6 +1220,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--enforce-eager", action="store_true", help="Disable torch.compile in vLLM.")
     parser.add_argument("--smoke-only", action="store_true", help="Run only the 8-problem smoke test.")
     parser.add_argument(
+        "--skip-smoke",
+        action="store_true",
+        help="Skip the 8-problem smoke test when dtype has already been verified on this GPU.",
+    )
+    parser.add_argument(
         "--out-root",
         type=str,
         default="assets",
@@ -1006,6 +1295,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         budgets=budgets_list,
         include_4k=args.include_4k,
         include_32k=args.include_32k,
+        skip_smoke=args.skip_smoke,
         alphas=alphas_list,
         n_problems=args.n,
         samples=args.samples,

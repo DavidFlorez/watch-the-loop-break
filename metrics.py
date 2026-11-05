@@ -76,6 +76,14 @@ def compute_loop_onset_from_token_ids(
     if (n_toks - w) % s != 0:
         starts.append(n_toks - w)
 
+    if hasattr(tokenizer, "batch_decode") and len(starts) > 1:
+        windows = [token_ids[start : start + w] for start in starts]
+        decoded_windows = tokenizer.batch_decode(windows, skip_special_tokens=False)
+        for start, win_text in zip(starts, decoded_windows):
+            if repeated_8gram_ratio(win_text) > float(threshold):
+                return int(start)
+        return None
+
     for start in starts:
         win_ids = token_ids[start : start + w]
         win_text = tokenizer.decode(win_ids, skip_special_tokens=False)

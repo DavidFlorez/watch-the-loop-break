@@ -161,40 +161,65 @@ def save_budget_curve_chart(
     combined_df: pd.DataFrame,
     out_path: Union[str, Path] = "assets/budget_curve_gpu.png",
 ) -> str:
-    """Render 3-panel budget curve (Strict Acc, Forced Acc, Cap-Hit % vs Token Budget) + Paper 32k stars."""
+    """Render GPU-only 3-panel budget curve (Strict Acc, Forced Acc, Cap-Hit % vs Token Budget) + Paper 32k stars."""
     target = Path(out_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(1, 3, figsize=(16.5, 5.4), dpi=160)
+    gpu_df = (
+        combined_df[combined_df["backend"] != "mps"].copy()
+        if not combined_df.empty and "backend" in combined_df.columns
+        else combined_df.copy()
+    )
+    if gpu_df.empty:
+        gpu_df = combined_df.copy()
+
+    # If multiple GPU cohorts exist (e.g. legacy N=50 and new N=200), keep the largest N cohort so lines never zig-zag
+    if not gpu_df.empty and "n_problems" in gpu_df.columns and "budget" in gpu_df.columns and "alpha" in gpu_df.columns:
+        gpu_df = (
+            gpu_df.sort_values(["n_problems", "total_evaluations"], ascending=[True, True])
+            .drop_duplicates(subset=["budget", "alpha"], keep="last")
+            .sort_values(["budget", "alpha"])
+            .reset_index(drop=True)
+        )
+
+    fig, axes = plt.subplots(1, 3, figsize=(15.0, 5.2), dpi=160)
     fig.patch.set_facecolor("#ffffff")
 
-    alphas = sorted(combined_df["alpha"].unique()) if not combined_df.empty else [0.0, 1.0, 1.25]
-    all_budgets = sorted({int(b) for b in combined_df["budget"].unique()} | {32768}) if not combined_df.empty else [4096, 8192, 16384, 32768]
+    alphas = sorted(gpu_df["alpha"].unique()) if not gpu_df.empty else [0.0, 1.0, 1.25]
+    all_budgets = (
+        sorted({int(b) for b in gpu_df["budget"].unique()} | {32768})
+        if not gpu_df.empty
+        else [4096, 8192, 16384, 32768]
+    )
+    n_label = (
+        f"N={int(gpu_df['n_problems'].max())}"
+        if not gpu_df.empty and "n_problems" in gpu_df.columns
+        else "GPU"
+    )
+    gpu_tag_label = (
+        str(gpu_df["gpu"].iloc[0]).upper()
+        if not gpu_df.empty and "gpu" in gpu_df.columns
+        else "GPU"
+    )
 
     def _style_x(ax: Any) -> None:
         ax.set_xscale("log", base=2)
         ax.set_xticks(all_budgets)
-        labels = []
-        for b in all_budgets:
-            if b == 4096 and not combined_df.empty and (combined_df["budget"] == 4096).any():
-                backends = set(combined_df.loc[combined_df["budget"] == 4096, "backend"])
-                labels.append("4096\n(MPS)" if backends == {"mps"} else f"{b}")
-            else:
-                labels.append(str(b))
-        ax.set_xticklabels(labels, fontsize=8.5)
-        ax.set_xlabel("Max New Token Budget", fontsize=10)
+        ax.set_xticklabels([f"{b // 1024}k ({b})" if b % 1024 == 0 else str(b) for b in all_budgets], fontsize=9.0)
+        ax.set_xlabel("Max New Token Budget (log₂ scale)", fontsize=10.5)
         ax.grid(True, linestyle="--", alpha=0.35)
 
     # Panel A: Strict Accuracy (%) vs Token Budget
     ax_a = axes[0]
     for a in alphas:
-        sub = combined_df[combined_df["alpha"] == a].sort_values("budget")
+        sub = gpu_df[gpu_df["alpha"] == a].sort_values("budget")
         if sub.empty:
             continue
         st = ALPHA_STYLE.get(float(a), {"color": "#475569", "marker": "o", "label": f"α = {a:g}"})
         x = sub["budget"].to_numpy()
         y = sub["accuracy_strict_pct"].to_numpy()
-        ax_a.plot(x, y, color=st["color"], marker=st["marker"], linewidth=2.4, markersize=7.5, label=st["label"])
+        lw = 2.0 if float(a) in (0.5, 0.75, 1.25, 1.5) else 2.8
+        ax_a.plot(x, y, color=st["color"], marker=st["marker"], linewidth=lw, markersize=7.5, label=st["label"])
         if "accuracy_ci95_low" in sub.columns and sub["accuracy_ci95_low"].notna().all():
             yerr_low = np.clip(y - sub["accuracy_ci95_low"].to_numpy(), 0, None)
             yerr_high = np.clip(sub["accuracy_ci95_high"].to_numpy() - y, 0, None)
@@ -206,33 +231,33 @@ def save_budget_curve_chart(
         [p_base["budget"]],
         [p_base["accuracy_pct"]],
         marker="*",
-        s=190,
+        s=200,
         color="#dc2626",
         edgecolors="#111827",
         linewidths=0.9,
         zorder=6,
-        label=f"Paper 32k Base ({p_base['accuracy_pct']}%)",
+        label=f"Paper 32k Base avg@4 ({p_base['accuracy_pct']}%)",
     )
     ax_a.scatter(
         [p_edit["budget"]],
         [p_edit["accuracy_pct"]],
         marker="*",
-        s=190,
+        s=200,
         color="#059669",
         edgecolors="#111827",
         linewidths=0.9,
         zorder=6,
-        label=f"Paper 32k Edit ({p_edit['accuracy_pct']}%)",
+        label=f"Paper 32k Edit avg@4 ({p_edit['accuracy_pct']}%)",
     )
-    ax_a.set_title("A. Strict Accuracy vs. Token Budget", fontsize=11.5, fontweight="bold")
-    ax_a.set_ylabel("Strict MATH-500 Accuracy (%)", fontsize=10)
-    ax_a.set_ylim(-3, 85)
+    ax_a.set_title("A. Strict Accuracy vs. Token Budget", fontsize=12.0, fontweight="bold")
+    ax_a.set_ylabel("Strict MATH-500 Accuracy (%)", fontsize=10.5)
+    ax_a.set_ylim(-3, 72)
     _style_x(ax_a)
-    ax_a.legend(loc="upper left", fontsize=8.0)
+    ax_a.legend(loc="upper left", fontsize=8.2, frameon=True)
 
     # Panel B: Forced-Answer Accuracy (%) vs Token Budget
     ax_b = axes[1]
-    forced_sub = combined_df[combined_df["forced_accuracy_pct"].notna()] if not combined_df.empty else combined_df
+    forced_sub = gpu_df[gpu_df["forced_accuracy_pct"].notna()] if not gpu_df.empty else gpu_df
     for a in alphas:
         sub = forced_sub[forced_sub["alpha"] == a].sort_values("budget")
         if sub.empty:
@@ -241,32 +266,34 @@ def save_budget_curve_chart(
         x = sub["budget"].to_numpy()
         yf = sub["forced_accuracy_pct"].to_numpy()
         ys = sub["accuracy_strict_pct"].to_numpy()
-        ax_b.plot(x, yf, color=st["color"], marker=st["marker"], linewidth=2.4, markersize=7.5, label=f"{st['label']} (Forced)")
-        ax_b.plot(x, ys, color=st["color"], linestyle=":", linewidth=1.3, alpha=0.55)
+        lw = 2.0 if float(a) in (0.5, 0.75, 1.25, 1.5) else 2.8
+        ax_b.plot(x, yf, color=st["color"], marker=st["marker"], linewidth=lw, markersize=7.5, label=f"{st['label']} (Forced)")
+        ax_b.plot(x, ys, color=st["color"], linestyle=":", linewidth=1.4, alpha=0.55)
         if "forced_accuracy_ci95_low" in sub.columns and sub["forced_accuracy_ci95_low"].notna().all():
             yerr_low = np.clip(yf - sub["forced_accuracy_ci95_low"].to_numpy(), 0, None)
             yerr_high = np.clip(sub["forced_accuracy_ci95_high"].to_numpy() - yf, 0, None)
             ax_b.errorbar(x, yf, yerr=[yerr_low, yerr_high], fmt="none", ecolor=st["color"], alpha=0.35, capsize=3)
 
-    ax_b.set_title("B. Forced-Answer Accuracy (Solid) vs Strict (Dotted)", fontsize=11.5, fontweight="bold")
-    ax_b.set_ylabel("Accuracy with Pass-2 Forced </think> (%)", fontsize=10)
-    ax_b.set_ylim(-3, 85)
+    ax_b.set_title("B. Forced-Answer Accuracy (Solid) vs. Strict (Dotted)", fontsize=12.0, fontweight="bold")
+    ax_b.set_ylabel("Accuracy with Pass-2 Forced Completion (%)", fontsize=10.5)
+    ax_b.set_ylim(-3, 72)
     _style_x(ax_b)
     if not forced_sub.empty:
-        ax_b.legend(loc="upper left", fontsize=8.0)
+        ax_b.legend(loc="upper left", fontsize=8.2, frameon=True)
     else:
         ax_b.text(0.5, 0.5, "Awaiting GPU forced-pass runs", transform=ax_b.transAxes, ha="center", va="center", fontsize=10, color="#64748b")
 
     # Panel C: % Hitting Token Cap vs Token Budget
     ax_c = axes[2]
     for a in alphas:
-        sub = combined_df[combined_df["alpha"] == a].sort_values("budget")
+        sub = gpu_df[gpu_df["alpha"] == a].sort_values("budget")
         if sub.empty:
             continue
         st = ALPHA_STYLE.get(float(a), {"color": "#475569", "marker": "o", "label": f"α = {a:g}"})
         x = sub["budget"].to_numpy()
         yc = sub["hit_cap_pct"].to_numpy()
-        ax_c.plot(x, yc, color=st["color"], marker=st["marker"], linewidth=2.4, markersize=7.5, label=st["label"])
+        lw = 2.0 if float(a) in (0.5, 0.75, 1.25, 1.5) else 2.8
+        ax_c.plot(x, yc, color=st["color"], marker=st["marker"], linewidth=lw, markersize=7.5, label=st["label"])
         if "hit_cap_ci95_low" in sub.columns and sub["hit_cap_ci95_low"].notna().all():
             yerr_low = np.clip(yc - sub["hit_cap_ci95_low"].to_numpy(), 0, None)
             yerr_high = np.clip(sub["hit_cap_ci95_high"].to_numpy() - yc, 0, None)
@@ -276,7 +303,7 @@ def save_budget_curve_chart(
         [p_base["budget"]],
         [p_base["hit_cap_pct"]],
         marker="*",
-        s=190,
+        s=200,
         color="#dc2626",
         edgecolors="#111827",
         linewidths=0.9,
@@ -287,27 +314,179 @@ def save_budget_curve_chart(
         [p_edit["budget"]],
         [p_edit["hit_cap_pct"]],
         marker="*",
-        s=190,
+        s=200,
         color="#059669",
         edgecolors="#111827",
         linewidths=0.9,
         zorder=6,
         label=f"Paper 32k Edit ({p_edit['hit_cap_pct']}%)",
     )
-    ax_c.set_title("C. Token-Cap Truncation Rate vs. Budget", fontsize=11.5, fontweight="bold")
-    ax_c.set_ylabel("% of Samples Hitting Token Cap", fontsize=10)
+    ax_c.set_title("C. Token-Cap Truncation Rate vs. Budget", fontsize=12.0, fontweight="bold")
+    ax_c.set_ylabel("% of Samples Hitting Token Cap", fontsize=10.5)
     ax_c.set_ylim(-5, 108)
     _style_x(ax_c)
-    ax_c.legend(loc="lower left", fontsize=8.0)
+    ax_c.legend(loc="lower left", fontsize=8.2, frameon=True)
 
     fig.suptitle(
-        "Scaling Weight-Space Programming Across Token Budgets (4k MPS -> 8k/16k/32k GPU vLLM)",
+        f"GPU-Only Token-Budget Scaling ({gpu_tag_label} vLLM, {n_label}, 4k → 8k → 16k → 32k)",
         fontsize=13.5,
         fontweight="bold",
-        y=1.02,
+        y=0.99,
     )
-    plt.tight_layout()
-    fig.savefig(target, bbox_inches="tight", dpi=160)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(target, dpi=160)
+    plt.close(fig)
+    return str(target)
+
+
+def save_mps_4k_comparison_chart(
+    *,
+    mps_csv_path: Union[str, Path] = "assets/sweep_results.csv",
+    gpu_4k_csv_path: Union[str, Path] = "assets/budget_4096/gpu-rtx-pro-6000-bfloat16/sweep_results.csv",
+    out_path: Union[str, Path] = "assets/mps_4k_comparison.png",
+) -> str:
+    """Render side-by-side 4,096-token Apple M3 MPS vs. NVIDIA RTX PRO 6000 GPU comparison."""
+    mps_p = Path(mps_csv_path)
+    gpu_p = Path(gpu_4k_csv_path)
+    target = Path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    mps_df = pd.read_csv(mps_p).sort_values("alpha") if mps_p.is_file() else pd.DataFrame()
+    gpu_df = pd.read_csv(gpu_p).sort_values("alpha") if gpu_p.is_file() else pd.DataFrame()
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.5, 5.2), dpi=160)
+    fig.patch.set_facecolor("#ffffff")
+
+    all_alphas = sorted(
+        set(mps_df["alpha"].tolist() if not mps_df.empty else [])
+        | set(gpu_df["alpha"].tolist() if not gpu_df.empty else [])
+    )
+    x_pos = np.arange(len(all_alphas))
+    width = 0.27
+
+    mps_strict = []
+    mps_lo, mps_hi = [], []
+    gpu_strict, gpu_forced = [], []
+    gpu_slo, gpu_shi = [], []
+    mps_tail, gpu_tail = [], []
+
+    for a in all_alphas:
+        m_sub = mps_df[mps_df["alpha"] == a] if not mps_df.empty else pd.DataFrame()
+        g_sub = gpu_df[gpu_df["alpha"] == a] if not gpu_df.empty else pd.DataFrame()
+        if not m_sub.empty:
+            r = m_sub.iloc[0]
+            val = float(r["accuracy_pct"])
+            lo, hi = wilson_ci(int(r["correct"]), int(r["n_problems"]))
+            mps_strict.append(val)
+            mps_lo.append(max(0.0, val - lo * 100.0))
+            mps_hi.append(max(0.0, hi * 100.0 - val))
+            mps_tail.append(float(r["mean_tail_rep_8gram_pct"]))
+        else:
+            mps_strict.append(np.nan)
+            mps_lo.append(0.0)
+            mps_hi.append(0.0)
+            mps_tail.append(np.nan)
+
+        if not g_sub.empty:
+            r = g_sub.iloc[0]
+            val = float(r["accuracy_pct"])
+            fval = float(r.get("forced_accuracy_pct", np.nan))
+            lo, hi = wilson_ci(int(r["correct"]), int(r["n_problems"]))
+            gpu_strict.append(val)
+            gpu_forced.append(fval)
+            gpu_slo.append(max(0.0, val - lo * 100.0))
+            gpu_shi.append(max(0.0, hi * 100.0 - val))
+            gpu_tail.append(float(r["mean_tail_rep_8gram_pct"]))
+        else:
+            gpu_strict.append(np.nan)
+            gpu_forced.append(np.nan)
+            gpu_slo.append(0.0)
+            gpu_shi.append(0.0)
+            gpu_tail.append(np.nan)
+
+    # Panel A: Accuracy @ 4096 Tokens
+    b1 = ax1.bar(x_pos - width, np.nan_to_num(mps_strict, nan=0.0), width, label="Apple M3 MPS (Strict)", color="#6366f1", alpha=0.9)
+    b2 = ax1.bar(x_pos, np.nan_to_num(gpu_strict, nan=0.0), width, label="RTX PRO 6000 vLLM (Strict)", color="#10b981", alpha=0.9)
+    b3 = ax1.bar(x_pos + width, np.nan_to_num(gpu_forced, nan=0.0), width, label="RTX PRO 6000 vLLM (Forced Pass 2)", color="#0ea5e9", alpha=0.75)
+
+    for idx, val in enumerate(mps_strict):
+        if pd.notna(val):
+            ax1.text(x_pos[idx] - width, val + 0.6, f"{val:.0f}%", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color="#312e81")
+    for idx, val in enumerate(gpu_strict):
+        if pd.notna(val):
+            ax1.text(x_pos[idx], val + 0.6, f"{val:.0f}%", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color="#065f46")
+        else:
+            ax1.text(x_pos[idx] + width * 0.5, 0.8, "n/a", ha="center", va="bottom", fontsize=7.5, color="#64748b")
+    for idx, val in enumerate(gpu_forced):
+        if pd.notna(val):
+            ax1.text(x_pos[idx] + width, val + 0.6, f"{val:.0f}%", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color="#0369a1")
+
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels([f"α = {a:g}\n({6*a:g}×)" for a in all_alphas], fontsize=9.5)
+    ax1.set_ylabel("MATH-500 Accuracy @ 4,096 Tokens (%)", fontsize=10.5)
+    ax1.set_title("A. 4k Accuracy: Local MPS vs. Cloud GPU vLLM", fontsize=12.0, fontweight="bold")
+    ax1.set_ylim(0, 22)
+    ax1.grid(True, axis="y", linestyle="--", alpha=0.35)
+    ax1.legend(loc="upper left", fontsize=8.5, frameon=True)
+
+    # Panel B: Last 240 Words Tail Loop Ratio (%) & Throughput
+    ax2.plot(x_pos, mps_tail, marker="o", linewidth=2.5, markersize=8, color="#6366f1", label="Apple M3 MPS — Last 240 Words Tail Loop (%)")
+    valid_g = [i for i, v in enumerate(gpu_tail) if pd.notna(v)]
+    if valid_g:
+        ax2.plot(
+            [x_pos[i] for i in valid_g],
+            [gpu_tail[i] for i in valid_g],
+            marker="s",
+            linewidth=2.5,
+            markersize=8,
+            color="#10b981",
+            label="RTX PRO 6000 vLLM — Last 240 Words Tail Loop (%)",
+        )
+    for i, val in enumerate(mps_tail):
+        if pd.notna(val):
+            g_v = gpu_tail[i] if i < len(gpu_tail) and pd.notna(gpu_tail[i]) else None
+            above = True if g_v is None else (float(val) >= float(g_v))
+            ax2.annotate(
+                f"{val:.1f}%",
+                (x_pos[i], val),
+                textcoords="offset points",
+                xytext=(12 if (i > 0 and above and g_v is not None) else 0, 8 if above else -14),
+                ha="left" if (i > 0 and above and g_v is not None) else "center",
+                fontsize=8.5,
+                fontweight="bold",
+                color="#312e81",
+            )
+    for i in valid_g:
+        val = float(gpu_tail[i])
+        m_v = mps_tail[i] if i < len(mps_tail) and pd.notna(mps_tail[i]) else None
+        above = False if m_v is None else (val > float(m_v))
+        ax2.annotate(
+            f"{val:.1f}%",
+            (x_pos[i], val),
+            textcoords="offset points",
+            xytext=(0, 8 if above else -14),
+            ha="center",
+            fontsize=8.5,
+            fontweight="bold",
+            color="#065f46",
+        )
+
+    ax2.set_xticks(x_pos)
+    ax2.set_xticklabels([f"α = {a:g}\n({6*a:g}×)" for a in all_alphas], fontsize=9.5)
+    ax2.set_ylabel("Last 240 Words Tail Loop Ratio (%)", fontsize=10.5)
+    ax2.set_title("B. Tail Loop Collapse Across Backends @ 4,096 Tokens", fontsize=12.0, fontweight="bold")
+    ax2.set_ylim(-2.2, 19.2)
+    ax2.grid(True, linestyle="--", alpha=0.35)
+    ax2.legend(loc="upper right", fontsize=8.5, frameon=True)
+
+    fig.suptitle(
+        "4,096-Token Budget Comparison: Local Apple M3 MPS vs. RTX PRO 6000 vLLM (N=50)",
+        fontsize=13.5,
+        fontweight="bold",
+        y=0.98,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(target, dpi=160)
     plt.close(fig)
     return str(target)
 
