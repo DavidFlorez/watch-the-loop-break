@@ -32,7 +32,14 @@ from metrics import (
     exact_mcnemar_test,
     extract_forced_boxed,
 )
-from scripts.generate_article_charts import generate_all_charts
+import matplotlib.figure
+from unittest.mock import patch
+
+from scripts.generate_article_charts import (
+    extract_rendered_strings,
+    generate_all_charts,
+    validate_figure_no_raw_markup,
+)
 from scripts.paper_reference import (
     build_paper_reference_table,
     compute_avg_at_k_row,
@@ -656,6 +663,45 @@ class TestLoopOnsetMcNemarAndPaperReference(unittest.TestCase):
                 self.assertTrue(p.is_file(), f"Missing chart {name}")
                 with Image.open(p) as im:
                     self.assertEqual(im.size, expected_charts[name], f"{name} size mismatch: got {im.size}")
+
+    def test_article_charts_contain_no_raw_markup(self) -> None:
+        if not (REPO_ROOT / "assets/paper_reference.csv").is_file():
+            self.skipTest("Repo paper_reference.csv not present.")
+
+        orig_savefig = matplotlib.figure.Figure.savefig
+        captured: Dict[str, List[str]] = {}
+        forbidden = ("\\", "$", "**", "\\boxed", "\\frac")
+
+        def _spy_savefig(self_fig: matplotlib.figure.Figure, fname: Any, *args: Any, **kwargs: Any) -> Any:
+            p = Path(str(fname))
+            if p.parent.name == "article":
+                rendered = extract_rendered_strings(self_fig)
+                validate_figure_no_raw_markup(self_fig, check_article_jargon=True)
+                captured[p.name] = rendered
+            return orig_savefig(self_fig, fname, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_art = Path(tmp) / "article"
+            with patch.object(matplotlib.figure.Figure, "savefig", autospec=True, side_effect=_spy_savefig):
+                summary = generate_all_charts(
+                    assets_root=REPO_ROOT / "assets",
+                    article_dir=tmp_art,
+                    with_tokenizer=False,
+                )
+            self.assertEqual(len(captured), 10, f"Expected 10 article figures, captured {sorted(captured.keys())}")
+            for fname, strings in captured.items():
+                self.assertGreater(len(strings), 3, f"No rendered strings captured for {fname}")
+                for s in strings:
+                    for bad in forbidden:
+                        self.assertNotIn(
+                            bad,
+                            s,
+                            f"Chart {fname} leaked raw markup {bad!r} in rendered string {s!r}",
+                        )
+            for name, path_str in summary["article_charts"].items():
+                expected_dim = (1500, 600) if name == "cover_5x2" else (1600, 1000)
+                with Image.open(path_str) as im:
+                    self.assertEqual(im.size, expected_dim, f"{name} dimension mismatch: {im.size}")
 
 
 if __name__ == "__main__":

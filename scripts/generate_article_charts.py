@@ -18,8 +18,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import matplotlib
+import matplotlib.cbook as cbook
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
+from matplotlib.backend_bases import RendererBase
+from matplotlib.mathtext import MathTextParser
 import numpy as np
 import pandas as pd
 
@@ -37,15 +41,181 @@ FIG_H_IN = 6.25  # 1000 px height (16:10 landscape, high legibility on desktop &
 OUTCOME_ORDER = [
     "Correct",
     "Wrong answer",
-    "Capped while looping",
-    "Capped not looping",
+    "Ran out while looping",
+    "Ran out, not looping",
 ]
 OUTCOME_COLORS = {
     "Correct": "#059669",
     "Wrong answer": "#f59e0b",
-    "Capped while looping": "#dc2626",
-    "Capped not looping": "#64748b",
+    "Ran out while looping": "#dc2626",
+    "Ran out, not looping": "#64748b",
 }
+
+HARDWARE_FOOTER_TEXT = "Run on a Colab GPU (RTX PRO 6000)"
+
+FORBIDDEN_RENDERED_TOKENS: Tuple[str, ...] = ("\\", "$", "**", "\\boxed", "\\frac")
+FORBIDDEN_ARTICLE_TERMS: Tuple[str, ...] = (
+    "</think>",
+    "bf16",
+    "bfloat16",
+    "Forced Pass-2",
+    "finish_reason",
+    "Blend coefficient",
+    "headline_budget_curve_full.png",
+)
+
+
+def _draw_rich_spans(
+    fig: Any,
+    ax: Any,
+    x: float,
+    y: float,
+    spans: Sequence[Tuple[str, ...]],
+    *,
+    fontsize: float,
+    default_color: str = "#0f172a",
+    fontfamily: str = "sans-serif",
+    default_weight: str = "normal",
+    va: str = "center",
+    zorder: int = 4,
+) -> List[Any]:
+    """Render mixed plain/bold/italic/mathtext spans cleanly along a single baseline."""
+    artists: List[Any] = []
+    cur_x = float(x)
+    total = len(spans)
+    for idx, span in enumerate(spans):
+        kind = span[0]
+        content = span[1]
+        col = span[2] if len(span) > 2 and span[2] else default_color
+        if kind == "math":
+            txt_str = f"${content}$"
+            t_art = ax.text(
+                cur_x,
+                y,
+                txt_str,
+                fontsize=fontsize,
+                fontfamily=fontfamily,
+                fontweight=default_weight,
+                color=col,
+                va=va,
+                ha="left",
+                parse_math=True,
+                zorder=zorder,
+            )
+        else:
+            fw = "bold" if kind == "bold" else default_weight
+            fs = "italic" if kind == "italic" else "normal"
+            t_art = ax.text(
+                cur_x,
+                y,
+                content,
+                fontsize=fontsize,
+                fontfamily=fontfamily,
+                fontweight=fw,
+                fontstyle=fs,
+                color=col,
+                va=va,
+                ha="left",
+                parse_math=False,
+                zorder=zorder,
+            )
+        artists.append(t_art)
+        if idx < total - 1:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            bb = t_art.get_window_extent(renderer=renderer).transformed(ax.transAxes.inverted())
+            cur_x = float(bb.x1)
+    return artists
+
+
+def _fit_text_to_width(fig: Any, text_artist: Any, max_width_frac: float = 0.92, min_fontsize: float = 7.5) -> None:
+    """Shrink font size proportionally if a figure-level text artist exceeds `max_width_frac`."""
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    fig_w = fig.get_window_extent(renderer=renderer).width
+    max_px = fig_w * max_width_frac
+    bb = text_artist.get_window_extent(renderer=renderer)
+    if bb.width > max_px and bb.width > 0:
+        cur_fs = float(text_artist.get_fontsize())
+        text_artist.set_fontsize(max(min_fontsize, cur_fs * (max_px / bb.width) * 0.985))
+
+
+def extract_rendered_strings(fig: Any) -> List[str]:
+    """Draw `fig` and collect every rendered non-mathtext string while verifying valid mathtext."""
+    import warnings
+
+    rendered: List[str] = []
+    seen_set = set()
+
+    def _add(val: str) -> None:
+        if val not in seen_set:
+            seen_set.add(val)
+            rendered.append(val)
+
+    orig_draw_text = RendererBase.draw_text
+
+    def _spy_draw_text(self: Any, gc: Any, x: Any, y: Any, s: str, prop: Any, angle: Any, ismath: Any = False, mtext: Any = None) -> Any:
+        if not ismath:
+            _add(str(s))
+        return orig_draw_text(self, gc, x, y, s, prop, angle, ismath=ismath, mtext=mtext)
+
+    RendererBase.draw_text = _spy_draw_text  # type: ignore[method-assign]
+    parser = MathTextParser("path")
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            fig.canvas.draw()
+            for w in caught:
+                msg = str(w.message)
+                if "MathTextWarning" in type(w.message).__name__ or "missing from font" in msg:
+                    raise AssertionError(f"Matplotlib rendering warning detected: {type(w.message).__name__}: {msg}")
+
+        dpi_val = float(fig.dpi)
+        for t in fig.findobj(matplotlib.text.Text):
+            if not t.get_visible():
+                continue
+            raw = t.get_text()
+            if not raw:
+                continue
+            is_valid_single_math = (
+                bool(t.get_parse_math())
+                and cbook.is_math_text(raw)
+                and raw.startswith("$")
+                and raw.endswith("$")
+                and "$$" not in raw
+                and raw.count("$") == 2
+            )
+            if is_valid_single_math:
+                for forbidden_in_math in ("**", "\\boxed", "\\binom"):
+                    if forbidden_in_math in raw:
+                        raise AssertionError(f"Forbidden raw markup {forbidden_in_math!r} inside math artist {raw!r}")
+                parser.parse(raw, dpi_val, t.get_fontproperties())
+            else:
+                _add(raw)
+    finally:
+        RendererBase.draw_text = orig_draw_text  # type: ignore[method-assign]
+
+    return rendered
+
+
+def validate_figure_no_raw_markup(fig: Any, *, check_article_jargon: bool = True) -> List[str]:
+    """Assert that a rendered figure contains zero raw markup/LaTeX or forbidden article jargon."""
+    rendered = extract_rendered_strings(fig)
+    for s in rendered:
+        for tok in FORBIDDEN_RENDERED_TOKENS:
+            if tok in s:
+                raise AssertionError(f"Rendered string contains forbidden markup {tok!r}: {s!r}")
+        if "_" in s:
+            raise AssertionError(f"Rendered plain string contains unformatted underscore '_': {s!r}")
+        if s.lstrip().startswith("*   ") or s.lstrip().startswith("* "):
+            raise AssertionError(f"Rendered plain string contains raw markdown bullet '* ': {s!r}")
+        if check_article_jargon:
+            low = s.lower()
+            for term in FORBIDDEN_ARTICLE_TERMS:
+                if term.lower() in low:
+                    raise AssertionError(f"Rendered article figure contains forbidden term {term!r}: {s!r}")
+    return rendered
+
 
 
 def _spread_y_positions(raw_ys: Sequence[float], min_sep: float, y_min: float, y_max: float) -> List[float]:
@@ -281,10 +451,11 @@ def generate_cover_5x2_chart(
     t1 = str(by_alpha.get(1.0, {}).get("text", ""))
     loop_line = "Wait, if toppings are distinct, then {A,B} is a valid configuration."
     box_line = "\\boxed{28}"
+    answer_sentence = "Thus, there are 28 different pizzas Mikka can order."
     if t0:
         assert loop_line in t0, f"Expected verbatim loop line in base trace for {problem_id}"
     if t1:
-        assert "</think>" in t1 and box_line in t1, f"Expected verbatim </think> and {box_line} in edit trace"
+        assert answer_sentence in t1 and box_line in t1, f"Expected verbatim answer and {box_line} in edit trace"
 
     cover_dpi = 150
     fig = plt.figure(figsize=(10.0, 4.0), dpi=cover_dpi)  # 1500 x 600 px exact (5:2)
@@ -294,12 +465,12 @@ def generate_cover_5x2_chart(
     ax.set_ylim(0, 1)
     ax.axis("off")
 
-    # Top-center bold headline overlay badge ("8.5% -> 48.5%" / "MATH-500, 32k tokens, N=200")
+    # Full-width top dark headline banner so both headline & subline read clearly at phone thumbnail size
     hero_pill = mpatches.FancyBboxPatch(
-        (0.24, 0.72),
-        0.52,
-        0.245,
-        boxstyle="round,pad=0.008,rounding_size=0.035",
+        (0.025, 0.725),
+        0.950,
+        0.240,
+        boxstyle="round,pad=0.008,rounding_size=0.032",
         facecolor="#0f172a",
         edgecolor="#334155",
         linewidth=2.0,
@@ -312,28 +483,29 @@ def generate_cover_5x2_chart(
         "8.5% → 48.5%",
         ha="center",
         va="center",
-        fontsize=28.0,
+        fontsize=29.0,
         fontweight="bold",
         color="#ffffff",
         zorder=6,
     )
-    ax.text(
+    sub_art = ax.text(
         0.50,
         0.770,
-        "MATH-500, 32k tokens, N=200",
+        "Same tiny model, 131,072 weights edited, 32k thinking tokens (MATH-500, 200 problems)",
         ha="center",
         va="center",
-        fontsize=13.5,
+        fontsize=13.2,
         fontweight="bold",
-        color="#cbd5e1",
+        color="#e2e8f0",
         zorder=6,
     )
+    _fit_text_to_width(fig, sub_art, max_width_frac=0.91, min_fontsize=10.5)
 
-    # Left panel: Base trace looping verbatim
+    # Left panel: Base model stuck in a loop
     left_card = mpatches.FancyBboxPatch(
-        (0.022, 0.055),
-        0.464,
-        0.625,
+        (0.025, 0.045),
+        0.463,
+        0.640,
         boxstyle="round,pad=0.008,rounding_size=0.025",
         facecolor="#fef2f2",
         edgecolor="#dc2626",
@@ -342,56 +514,60 @@ def generate_cover_5x2_chart(
     )
     ax.add_patch(left_card)
     ax.text(
-        0.040,
-        0.625,
-        "Base Model (α = 0.0) — Looped to 32k Cap",
-        fontsize=12.4,
+        0.045,
+        0.628,
+        "Base model: stuck in a loop",
+        fontsize=15.0,
         fontweight="bold",
         color="#991b1b",
         va="center",
         zorder=3,
     )
-    loop_excerpt = "*   Wait, if toppings are distinct, then {A,B} is a valid configuration."
-    left_lines = [
-        ("Here's a thinking process that leads to the solution:", "#475569", False),
-        ("…", "#64748b", False),
-        (loop_excerpt, "#dc2626", True),
-        (loop_excerpt, "#b91c1c", True),
-        (loop_excerpt, "#dc2626", True),
-        (loop_excerpt, "#b91c1c", True),
-        ("…", "#64748b", False),
-    ]
-    ly = 0.545
-    for txt_l, col_l, bold_l in left_lines:
+
+    # 3 verbatim repeats rendered with chat bullets in large phone-readable font
+    ly = 0.542
+    for rep_idx in range(3):
+        pill_bg = mpatches.FancyBboxPatch(
+            (0.042, ly - 0.112),
+            0.428,
+            0.122,
+            boxstyle="round,pad=0.004,rounding_size=0.015",
+            facecolor="#fee2e2" if rep_idx % 2 == 0 else "#ffffff",
+            edgecolor="#fca5a5",
+            linewidth=1.1,
+            zorder=2.5,
+        )
+        ax.add_patch(pill_bg)
         ax.text(
-            0.040,
-            ly,
-            txt_l,
-            fontsize=6.5,
-            fontfamily="monospace",
-            fontweight="bold" if bold_l else "normal",
-            color=col_l,
+            0.052,
+            ly - 0.014,
+            "•  Wait, if toppings are distinct, then {A,B} is\n    a valid configuration.",
+            fontsize=11.0,
+            fontweight="bold" if rep_idx == 0 else "normal",
+            color="#991b1b" if rep_idx == 0 else "#b91c1c",
             va="top",
+            linespacing=1.22,
             parse_math=False,
             zorder=3,
         )
-        ly -= 0.064
+        ly -= 0.136
+
     ax.text(
-        0.040,
-        0.095,
-        "No </think> · Strict Grade: None",
-        fontsize=12.0,
+        0.045,
+        0.088,
+        "Ran out at 32,768 tokens",
+        fontsize=13.5,
         fontweight="bold",
         color="#7f1d1d",
         va="center",
         zorder=3,
     )
 
-    # Right panel: Edited trace verbatim </think> and \boxed{28} finish
+    # Right panel: Edited model answer in 3,843 tokens
     right_card = mpatches.FancyBboxPatch(
-        (0.514, 0.055),
-        0.464,
-        0.625,
+        (0.512, 0.045),
+        0.463,
+        0.640,
         boxstyle="round,pad=0.008,rounding_size=0.025",
         facecolor="#ecfdf5",
         edgecolor="#059669",
@@ -401,72 +577,64 @@ def generate_cover_5x2_chart(
     ax.add_patch(right_card)
     ax.text(
         0.532,
-        0.625,
-        "Published Edit (α = 1.0) · Solved in 3,843 tok",
-        fontsize=12.2,
+        0.628,
+        "Edited model: answer in 3,843 tokens",
+        fontsize=14.6,
         fontweight="bold",
         color="#065f46",
         va="center",
         zorder=3,
     )
-    right_lines = [
-        ("Here's a thinking process that leads to the solution:", "#475569", False),
-        ("…", "#64748b", False),
-        ("</think>", "#047857", True),
-        ("Thus, there are 28 different pizzas Mikka can order.", "#1e293b", True),
-    ]
-    ry = 0.545
-    for txt_r, col_r, bold_r in right_lines:
-        ax.text(
-            0.532,
-            ry,
-            txt_r,
-            fontsize=7.3,
-            fontfamily="monospace",
-            fontweight="bold" if bold_r else "normal",
-            color=col_r,
-            va="top",
-            parse_math=False,
-            zorder=3,
-        )
-        ry -= 0.072
-
-    # Big verbatim \boxed{28} badge
-    box_pill = mpatches.FancyBboxPatch(
-        (0.532, 0.145),
-        0.428,
-        0.135,
-        boxstyle="round,pad=0.006,rounding_size=0.02",
-        facecolor="#d1fae5",
-        edgecolor="#059669",
-        linewidth=1.8,
+    ax.text(
+        0.532,
+        0.525,
+        "Thus, there are 28 different pizzas\nMikka can order.",
+        fontsize=13.4,
+        fontweight="bold",
+        color="#0f172a",
+        va="top",
+        linespacing=1.32,
+        parse_math=False,
         zorder=3,
     )
-    ax.add_patch(box_pill)
+
+    # Chat-app rendered boxed answer badge ("28 ✓")
+    box_outer = mpatches.FancyBboxPatch(
+        (0.545, 0.125),
+        0.398,
+        0.220,
+        boxstyle="round,pad=0.006,rounding_size=0.022",
+        facecolor="#ffffff",
+        edgecolor="#10b981",
+        linewidth=2.0,
+        zorder=3,
+    )
+    ax.add_patch(box_outer)
+    box_inner = mpatches.FancyBboxPatch(
+        (0.645, 0.155),
+        0.198,
+        0.160,
+        boxstyle="square,pad=0.004",
+        facecolor="#d1fae5",
+        edgecolor="#047857",
+        linewidth=2.6,
+        zorder=3.5,
+    )
+    ax.add_patch(box_inner)
     ax.text(
-        0.746,
-        0.212,
-        "\\boxed{28}",
+        0.744,
+        0.235,
+        "28 ✓",
         ha="center",
         va="center",
-        fontsize=21.0,
-        fontfamily="monospace",
+        fontsize=24.0,
         fontweight="bold",
         color="#065f46",
         parse_math=False,
         zorder=4,
     )
-    ax.text(
-        0.532,
-        0.095,
-        "Clean </think> · Strict Grade: PASS",
-        fontsize=12.0,
-        fontweight="bold",
-        color="#065f46",
-        va="center",
-        zorder=3,
-    )
 
+    validate_figure_no_raw_markup(fig, check_article_jargon=True)
     fig.savefig(target, dpi=cover_dpi, bbox_inches=None)
     plt.close(fig)
     return str(target)
@@ -493,33 +661,33 @@ def _render_headline_budget_curve_impl(
     fig.patch.set_facecolor("#ffffff")
     ax.set_facecolor("#ffffff")
 
-    # 4k "budget trap" shaded region
+    # 4k tokens shaded zone
     ax.axvspan(3400, 4800, color="#f1f5f9", alpha=0.90, zorder=1)
     if phone_mode:
         ax.annotate(
-            "4k Budget Trap\n91–97% hit cap\nstrict ≤ 9.5%",
-            xy=(4350, 14.5),
-            xytext=(5150, 25.0),
+            "At 4k tokens:\n91–97% ran out of tokens",
+            xy=(4350, 13.5),
+            xytext=(5150, 24.5),
             ha="left",
             va="center",
             fontsize=13.0,
             fontweight="bold",
             color="#334155",
             arrowprops=dict(arrowstyle="->", color="#64748b", lw=1.4),
-            bbox=dict(boxstyle="round,pad=0.30", facecolor="#ffffff", edgecolor="#94a3b8", lw=1.2, alpha=0.97),
+            bbox=dict(boxstyle="round,pad=0.32", facecolor="#ffffff", edgecolor="#94a3b8", lw=1.2, alpha=0.97),
             zorder=6,
         )
     else:
         ax.text(
             4096,
             24.5,
-            "4k Budget Trap\n91–97% hit cap thinking\n(strict acc ≤ 9.5%)",
+            "At 4k tokens:\n91–97% ran out of tokens",
             ha="center",
             va="center",
-            fontsize=8.3,
+            fontsize=8.6,
             fontweight="bold",
             color="#475569",
-            bbox=dict(boxstyle="round,pad=0.26", facecolor="#ffffff", edgecolor="#cbd5e1", lw=1.0, alpha=0.96),
+            bbox=dict(boxstyle="round,pad=0.28", facecolor="#ffffff", edgecolor="#cbd5e1", lw=1.0, alpha=0.96),
             zorder=6,
         )
 
@@ -533,12 +701,8 @@ def _render_headline_budget_curve_impl(
             "marker": "o",
             "ms": 9.5 if phone_mode else 8.0,
             "ci": True,
-            "label": (
-                f"Base Model (α = 0.0, N={n_core}, 95% CI)"
-                if phone_mode
-                else f"Base Model (α = 0.0, 0.00% edited, N={n_core}, 95% CI)"
-            ),
-            "short": "Base α=0.0",
+            "label": "Base model",
+            "short": "Base model",
             "z": 5,
         },
         1.0: {
@@ -547,22 +711,18 @@ def _render_headline_budget_curve_impl(
             "marker": "s",
             "ms": 9.5 if phone_mode else 8.0,
             "ci": True,
-            "label": (
-                f"Published Edit (α = 1.0, N={n_core}, 95% CI)"
-                if phone_mode
-                else f"Published Edit (α = 1.0, 0.0150% edited, N={n_core}, 95% CI)"
-            ),
-            "short": "Edit α=1.0",
+            "label": "Edited (published strength)",
+            "short": "Edited (published)",
             "z": 6,
         },
         1.25: {
             "color": "#2563eb",
-            "lw": 1.9,
+            "lw": 2.0,
             "marker": "D",
-            "ms": 6.2,
+            "ms": 6.4,
             "ci": False,
-            "label": f"1.25× Extrapolation (α = 1.25, N={n_core})",
-            "short": "Extrapolated α=1.25",
+            "label": "Edited (1.25× strength)",
+            "short": "Edited (1.25×)",
             "z": 4,
         },
     }
@@ -607,7 +767,7 @@ def _render_headline_budget_curve_impl(
             }
         )
 
-    # Paper truncated curves (only in full mode) & same-problem 32k avg@4 stars (both modes)
+    # Paper truncated curves (only in full mode) & same-problem 32k stars (both modes)
     if not paper_df.empty:
         if not phone_mode:
             trunc_sub = paper_df[
@@ -615,8 +775,8 @@ def _render_headline_budget_curve_impl(
                 & (paper_df["cohort"] == "paper_first_samples_n200")
             ]
             for cond, col, lbl, short in (
-                ("unedited", "#ef4444", "Paper 1st-Sample Truncated: Base (N=200, approx.)", "Paper 1st Base"),
-                ("p50c", "#10b981", "Paper 1st-Sample Truncated: Edit p50c (N=200, approx.)", "Paper 1st Edit"),
+                ("unedited", "#ef4444", "Paper first-sample cut: Base", "Paper cut: Base"),
+                ("p50c", "#10b981", "Paper first-sample cut: Edited", "Paper cut: Edited"),
             ):
                 c_df = trunc_sub[trunc_sub["condition"] == cond].sort_values("budget")
                 if c_df.empty:
@@ -650,12 +810,12 @@ def _render_headline_budget_curve_impl(
             star_cohort = "our_n50" if "our_n50" in set(paper_df["cohort"].unique()) else "math500_all_500"
 
         star_sub = paper_df[(paper_df["metric_type"] == "avg_at_4") & (paper_df["cohort"] == star_cohort)]
-        star_x = 32768.0 * (1.045 if phone_mode else 1.03)
-        star_vals: Dict[str, float] = {}
+        # Offset the 32k stars clearly to the right so they never overlap the 32,768 markers
+        star_x = 32768.0 * (1.085 if phone_mode else 1.075)
         n_match_val = n_core if n_core > 0 else 200
         for cond, col, short in (
-            ("unedited", "#991b1b", "Paper avg@4 Base"),
-            ("p50c", "#065f46", "Paper avg@4 Edit"),
+            ("unedited", "#991b1b", "Paper 32k Base"),
+            ("p50c", "#065f46", "Paper 32k Edited"),
         ):
             s_row = star_sub[star_sub["condition"] == cond]
             if s_row.empty:
@@ -663,20 +823,13 @@ def _render_headline_budget_curve_impl(
             r0 = s_row.iloc[0]
             y_val = float(r0["accuracy_pct"])
             n_match_val = int(r0["n_problems"])
-            star_vals[cond] = y_val
-            lbl_star = None
-            if phone_mode:
-                if cond == "p50c":
-                    b_star = star_vals.get("unedited", 9.5)
-                    lbl_star = f"Paper 32k avg@4 (same N={n_match_val}: {b_star:.1f}%, {y_val:.1f}%)"
-            else:
-                lbl_star = f"{short} (same {n_match_val} probs @ 32k: {y_val:.1f}%)"
+            lbl_star = None if phone_mode else f"{short} (same {n_match_val} problems: {y_val:.1f}%)"
 
             ax.scatter(
                 [star_x],
                 [y_val],
                 marker="*",
-                s=340 if phone_mode else 250,
+                s=330 if phone_mode else 240,
                 color=col,
                 edgecolors="#0f172a",
                 linewidths=1.1,
@@ -687,23 +840,36 @@ def _render_headline_budget_curve_impl(
                 {
                     "x": star_x,
                     "y": y_val,
-                    "text": f"★ {short} (N={n_match_val}): {y_val:.1f}%",
+                    "text": f"★ {short}: {y_val:.1f}%",
                     "color": col,
                     "bold": True,
                 }
             )
 
+        if phone_mode:
+            # Neutral legend proxy for the two 32k paper stars
+            ax.scatter(
+                [],
+                [],
+                marker="*",
+                s=220,
+                color="#475569",
+                edgecolors="#0f172a",
+                linewidths=1.0,
+                label=f"Paper's result at 32k (same {n_match_val} problems)",
+            )
+
     if phone_mode:
-        # Clean, unobstructed direct end labels ("8.5%" and "48.5%") with >=28px font size
+        # Clean direct endpoint labels positioned well clear of both 32,768 points and offset stars
         if 1.0 in endpoints_by_alpha:
             y1 = endpoints_by_alpha[1.0]
             ax.text(
-                35600.0,
-                y1 + 2.6,
+                32768.0,
+                y1 + 7.4,
                 f"{y1:.1f}%",
-                ha="left",
+                ha="center",
                 va="bottom",
-                fontsize=16.0,
+                fontsize=16.5,
                 fontweight="bold",
                 color="#059669",
                 zorder=9,
@@ -711,19 +877,19 @@ def _render_headline_budget_curve_impl(
         if 0.0 in endpoints_by_alpha:
             y0 = endpoints_by_alpha[0.0]
             ax.text(
-                35600.0,
-                y0 - 2.2,
+                37600.0,
+                y0,
                 f"{y0:.1f}%",
                 ha="left",
-                va="top",
-                fontsize=16.0,
+                va="center",
+                fontsize=16.5,
                 fontweight="bold",
                 color="#dc2626",
                 zorder=9,
             )
 
         ax.set_xscale("log", base=2)
-        ax.set_xlim(3100, 49000)
+        ax.set_xlim(3100, 47500)
         ax.set_xticks([4096, 8192, 16384, 32768])
         ax.set_xticklabels(["4,096", "8,192", "16,384", "32,768"], fontsize=13.5, fontweight="bold")
         ax.minorticks_off()
@@ -732,8 +898,8 @@ def _render_headline_budget_curve_impl(
         ax.set_yticks([0, 10, 20, 30, 40, 50, 60])
         ax.set_yticklabels([f"{v}%" for v in (0, 10, 20, 30, 40, 50, 60)], fontsize=13.5)
 
-        ax.set_xlabel("Thinking Token Budget (log₂ scale)", fontsize=14.0, fontweight="bold", labelpad=5, color="#0f172a")
-        ax.set_ylabel("Strict Accuracy (%)", fontsize=14.0, fontweight="bold", labelpad=6, color="#0f172a")
+        ax.set_xlabel("Thinking budget (tokens)", fontsize=14.0, fontweight="bold", labelpad=5, color="#0f172a")
+        ax.set_ylabel("Correct final answer (%)", fontsize=14.0, fontweight="bold", labelpad=6, color="#0f172a")
         ax.grid(True, linestyle="--", alpha=0.35, color="#cbd5e1")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -755,52 +921,59 @@ def _render_headline_budget_curve_impl(
             color="#0f172a",
             y=0.965,
         )
-        fig.text(
+        sub_t = fig.text(
             0.5,
             0.902,
-            f"Strict accuracy after </think> (RTX PRO 6000 bf16, N={n_core}) vs. Takehi et al. avg@4 ★",
+            f"Share of problems with a correct final answer, {n_core} MATH-500 problems, 95% intervals",
             ha="center",
             va="center",
             fontsize=13.2,
             color="#475569",
         )
+        _fit_text_to_width(fig, sub_t, max_width_frac=0.93, min_fontsize=10.0)
         fig.text(
             0.5,
-            0.044,
-            "See headline_budget_curve_full.png for α=1.25 (30.5% @ 16k, 51.5% @ 32k)\n"
-            "and Takehi et al. 1st-sample truncated curves (8% → 46%)",
+            0.025,
+            HARDWARE_FOOTER_TEXT,
             ha="center",
             va="center",
-            fontsize=13.0,
-            color="#475569",
+            fontsize=9.5,
+            color="#64748b",
         )
-        fig.subplots_adjust(left=0.095, right=0.975, top=0.845, bottom=0.185)
+        fig.subplots_adjust(left=0.095, right=0.975, top=0.845, bottom=0.155)
     else:
         if right_endpoints:
             spread_ys = _spread_y_positions(
                 [pt["y"] for pt in right_endpoints],
-                min_sep=4.9,
-                y_min=1.0,
-                y_max=61.5,
+                min_sep=4.6,
+                y_min=1.5,
+                y_max=58.5,
             )
-            label_x = 39000.0
+            label_x = 42500.0
             for pt, ly in zip(right_endpoints, spread_ys):
-                ax.annotate(
+                ax.plot(
+                    [pt["x"], label_x * 1.015],
+                    [pt["y"], ly],
+                    color=pt["color"],
+                    lw=1.1,
+                    alpha=0.55,
+                    zorder=4,
+                )
+                ax.text(
+                    label_x,
+                    ly,
                     pt["text"],
-                    xy=(pt["x"], pt["y"]),
-                    xytext=(label_x, ly),
                     ha="left",
                     va="center",
-                    fontsize=8.3,
+                    fontsize=8.6,
                     fontweight="bold" if pt["bold"] else "normal",
                     color=pt["color"],
-                    arrowprops=dict(arrowstyle="-", color=pt["color"], lw=0.9, alpha=0.55),
                     bbox=dict(
-                        boxstyle="round,pad=0.20",
+                        boxstyle="round,pad=0.24",
                         facecolor="#ffffff",
                         edgecolor=pt["color"],
-                        lw=0.8 if pt["bold"] else 0.5,
-                        alpha=0.95,
+                        lw=0.85 if pt["bold"] else 0.55,
+                        alpha=1.0,
                     ),
                     zorder=9,
                 )
@@ -808,15 +981,15 @@ def _render_headline_budget_curve_impl(
         ax.set_xscale("log", base=2)
         ax.set_xlim(3000, 128000)
         ax.set_xticks([4096, 8192, 16384, 32768])
-        ax.set_xticklabels(["4,096\n(4k)", "8,192\n(8k)", "16,384\n(16k)", "32,768\n(32k)"], fontsize=10.5, fontweight="bold")
+        ax.set_xticklabels(["4,096\n(4k)", "8,192\n(8k)", "16,384\n(16k)", "32,768\n(32k)"], fontsize=10.8, fontweight="bold")
         ax.minorticks_off()
 
         ax.set_ylim(-2.5, 64.5)
         ax.set_yticks([0, 10, 20, 30, 40, 50, 60])
-        ax.set_yticklabels([f"{v}%" for v in (0, 10, 20, 30, 40, 50, 60)], fontsize=10.0)
+        ax.set_yticklabels([f"{v}%" for v in (0, 10, 20, 30, 40, 50, 60)], fontsize=10.5)
 
-        ax.set_xlabel("Thinking Token Budget (log₂ scale)", fontsize=11.0, fontweight="bold", labelpad=6, color="#0f172a")
-        ax.set_ylabel("Strict MATH-500 Accuracy (%)", fontsize=11.0, fontweight="bold", labelpad=6, color="#0f172a")
+        ax.set_xlabel("Thinking budget (tokens)", fontsize=11.5, fontweight="bold", labelpad=5, color="#0f172a")
+        ax.set_ylabel("Correct final answer (%)", fontsize=11.5, fontweight="bold", labelpad=6, color="#0f172a")
         ax.grid(True, linestyle="--", alpha=0.35, color="#cbd5e1")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
@@ -824,7 +997,7 @@ def _render_headline_budget_curve_impl(
         ax.legend(
             loc="upper left",
             bbox_to_anchor=(0.01, 0.99),
-            fontsize=8.2,
+            fontsize=8.6,
             frameon=True,
             facecolor="#ffffff",
             edgecolor="#cbd5e1",
@@ -833,22 +1006,33 @@ def _render_headline_budget_curve_impl(
 
         fig.suptitle(
             "The edit only pays off when you let it think",
-            fontsize=15.0,
+            fontsize=16.0,
             fontweight="bold",
             color="#0f172a",
             y=0.965,
         )
-        fig.text(
+        sub_full = fig.text(
             0.5,
-            0.915,
-            f"Strict boxed accuracy after </think> on RTX PRO 6000 (bf16, N={n_core}) vs. Takehi et al. (2026) 1st-sample & 32k avg@4 references",
+            0.912,
+            f"Share of problems with a correct final answer, {n_core} MATH-500 problems, vs. paper references",
             ha="center",
             va="center",
-            fontsize=9.8,
+            fontsize=10.5,
             color="#475569",
         )
-        fig.subplots_adjust(left=0.075, right=0.985, top=0.87, bottom=0.125)
+        _fit_text_to_width(fig, sub_full, max_width_frac=0.93, min_fontsize=8.5)
+        fig.text(
+            0.5,
+            0.022,
+            HARDWARE_FOOTER_TEXT,
+            ha="center",
+            va="center",
+            fontsize=9.0,
+            color="#64748b",
+        )
+        fig.subplots_adjust(left=0.078, right=0.985, top=0.865, bottom=0.145)
 
+    validate_figure_no_raw_markup(fig, check_article_jargon=True)
     fig.savefig(target, dpi=DPI, bbox_inches=None)
     plt.close(fig)
     return str(target)
@@ -860,7 +1044,7 @@ def generate_headline_budget_curve(
     out_path: Union[str, Path] = "assets/article/headline_budget_curve.png",
     paper_csv: Optional[Union[str, Path]] = None,
 ) -> str:
-    """1. Headline Budget Curve (Phone Version): Base (α=0) & Edit (α=1.0) with Wilson CIs + Paper avg@4 stars."""
+    """1. Headline Budget Curve (Phone Version): Base model & Edited (published) with 95% intervals + Paper 32k stars."""
     return _render_headline_budget_curve_impl(
         assets_root=assets_root,
         out_path=out_path,
@@ -891,7 +1075,7 @@ def generate_hero_trace_chart(
     problem_id: str = "test/counting_and_probability/389.json",
     tokenizer: Any = None,
 ) -> str:
-    """2. Hero Trace Comparison: verbatim 389.json excerpts (token 798 '=28' -> loop @ 5,120 vs clean boxed 28)."""
+    """2. Hero Trace Comparison: verbatim 389.json excerpts rendered cleanly like a chat app."""
     root = Path(assets_root)
     target = Path(out_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -928,36 +1112,60 @@ def generate_hero_trace_chart(
     if onset0 is None and t0:
         onset0 = _get_or_compute_loop_onset(r0, tokenizer=tokenizer)
     onset0_val = int(onset0) if onset0 is not None else 5120
-    rep0_pct = float(r0.get("rep_8gram_ratio", 0.831)) * 100.0
     tail0_pct = float(r0.get("tail_rep_8gram_ratio", 0.9485)) * 100.0
-    rep1_pct = float(r1.get("rep_8gram_ratio", 0.005)) * 100.0
     tail1_pct = float(r1.get("tail_rep_8gram_ratio", 0.0)) * 100.0
+
+    # Verify every verbatim source line exists in the underlying JSONL text
+    expected_t0_snippets = [
+        "Here's a thinking process that leads to the solution:",
+        "1.  **Analyze the Problem:**",
+        "*   So, $C(8, 2)$.",
+        r"*   Calculation: $\frac{8 \times 7}{2} = 28$.",
+        loop_sentence,
+    ]
+    expected_t1_snippets = [
+        "Here's a thinking process that leads to the solution:",
+        "1.  **Analyze the Problem:**",
+        "**Step 3: Perform the Calculation**",
+        r"$$ = \frac{8 \times 7}{2} $$",
+        r"$$ = \frac{56}{2} $$",
+        "$$ = 28 $$",
+        "Thus, there are 28 different pizzas Mikka can order.",
+        r"\boxed{28}",
+    ]
+    if t0:
+        for snip in expected_t0_snippets:
+            assert snip in t0, f"Base trace missing expected verbatim snippet: {snip!r}"
+    if t1:
+        for snip in expected_t1_snippets:
+            assert snip in t1, f"Edited trace missing expected verbatim snippet: {snip!r}"
 
     fig = plt.figure(figsize=(FIG_W_IN, FIG_H_IN), dpi=DPI)
     fig.patch.set_facecolor("#ffffff")
-    ax = fig.add_axes([0.018, 0.025, 0.964, 0.825])
+    ax = fig.add_axes([0.018, 0.036, 0.964, 0.815])
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
 
     fig.suptitle(
-        "Anatomy of a Broken Loop — MATH-500 Problem 389 @ 32,768-Token Budget",
-        fontsize=14.4,
+        "MATH-500 counting problem: 8 toppings, pick 2",
+        fontsize=18.2,
         fontweight="bold",
         color="#0f172a",
         y=0.968,
     )
-    fig.text(
+    prob_sub = fig.text(
         0.5,
-        0.905,
+        0.902,
         "\"Mikka wants to order a pizza with two different toppings. He has 8 different\n"
-        "toppings to choose from. How many different pizzas could he order?\"   (Gold Answer: 28)",
+        "toppings to choose from. How many different pizzas could he order?\"   (Gold answer: 28)",
         ha="center",
         va="center",
-        fontsize=9.1,
+        fontsize=11.4,
         style="italic",
         color="#334155",
     )
+    _fit_text_to_width(fig, prob_sub, max_width_frac=0.94, min_fontsize=9.5)
 
     def _draw_column(
         x0: float,
@@ -967,15 +1175,15 @@ def generate_hero_trace_chart(
         header_bg: str,
         border_col: str,
         title_col: str,
-        badge_text: str,
-        transcript_lines: List[Tuple[str, str, bool]],
+        sub_note: str,
+        rich_lines: List[Dict[str, Any]],
         metrics: List[Tuple[str, str, str]],
         is_base: bool,
     ) -> None:
         card = mpatches.FancyBboxPatch(
-            (x0, 0.028),
+            (x0, 0.025),
             w,
-            0.942,
+            0.948,
             boxstyle="round,pad=0.005,rounding_size=0.018",
             facecolor="#ffffff",
             edgecolor=border_col,
@@ -986,14 +1194,14 @@ def generate_hero_trace_chart(
         hdr = mpatches.FancyBboxPatch(
             (x0 + 0.012, 0.868),
             w - 0.024,
-            0.092,
+            0.094,
             boxstyle="round,pad=0.005,rounding_size=0.014",
             facecolor=header_bg,
             edgecolor="none",
         )
         ax.add_patch(hdr)
-        ax.text(x0 + 0.022, 0.930, header_title, fontsize=10.2, fontweight="bold", color=title_col, va="center")
-        ax.text(x0 + 0.022, 0.888, badge_text, fontsize=6.65, fontweight="bold", color="#334155", va="center")
+        ax.text(x0 + 0.022, 0.930, header_title, fontsize=12.6, fontweight="bold", color=title_col, va="center")
+        ax.text(x0 + 0.022, 0.888, sub_note, fontsize=8.8, fontweight="bold", color="#334155", va="center")
 
         bar_x = x0 + 0.022
         bar_w = w - 0.044
@@ -1003,8 +1211,8 @@ def generate_hero_trace_chart(
         ax.text(
             bar_x,
             bar_y + bar_h + 0.014,
-            "Token Budget Timeline (0 → 32,768 tokens, shared scale)",
-            fontsize=8.3,
+            "Thinking budget (0 → 32,768 tokens)",
+            fontsize=9.2,
             fontweight="bold",
             color="#475569",
         )
@@ -1035,55 +1243,53 @@ def generate_hero_trace_chart(
             ax.plot([calc_x, calc_x], [bar_y - 0.005, bar_y + bar_h + 0.003], color="#b45309", lw=1.8, linestyle="--", zorder=5)
             ax.plot([loop_x, loop_x], [bar_y - 0.005, bar_y + bar_h + 0.003], color="#7f1d1d", lw=2.0, zorder=5)
 
-            # Wide unclipped dark-red loop pill centered inside the loop bar
             ax.text(
                 bar_x + w_pre + w_loop / 2,
                 bar_y + bar_h / 2,
-                f"Looped tok {onset0_val:,} → {tok0:,} ({repeat_cnt:,}× repeats)",
+                f"Looped tokens {onset0_val:,} → {tok0:,} ({repeat_cnt:,}× repeats)",
                 ha="center",
                 va="center",
-                fontsize=7.55,
+                fontsize=7.6,
                 fontweight="bold",
                 color="#ffffff",
-                bbox=dict(boxstyle="round,pad=0.22", facecolor="#991b1b", edgecolor="none", alpha=0.94),
+                bbox=dict(boxstyle="round,pad=0.22", facecolor="#991b1b", edgecolor="none", alpha=0.95),
             )
 
-            # Wide unclipped callout pills below the timeline bar with crisp leader ticks to tok 798 and tok 5,120
-            lbl1_x = bar_x + 0.004
+            lbl1_x = bar_x + 0.002
             ax.text(
                 lbl1_x,
                 call_y,
-                f"=28 computed @ tok {calc28_tok_val:,}",
+                f"= 28 at token {calc28_tok_val:,}",
                 ha="left",
                 va="center",
-                fontsize=6.7,
+                fontsize=7.2,
                 fontweight="bold",
                 color="#92400e",
                 bbox=dict(boxstyle="round,pad=0.22", facecolor="#fffbeb", edgecolor="#d97706", lw=0.9),
             )
             ax.plot([calc_x, lbl1_x + 0.045], [bar_y - 0.005, call_y + 0.015], color="#d97706", lw=1.1, zorder=4)
 
-            lbl2_x = bar_x + 0.172
+            lbl2_x = bar_x + 0.155
             ax.text(
                 lbl2_x,
                 call_y,
-                f"Loop onset @ tok {onset0_val:,}",
+                f"Loop starts at token {onset0_val:,}",
                 ha="left",
                 va="center",
-                fontsize=6.7,
+                fontsize=7.2,
                 fontweight="bold",
                 color="#7f1d1d",
                 bbox=dict(boxstyle="round,pad=0.22", facecolor="#fef2f2", edgecolor="#dc2626", lw=0.9),
             )
-            ax.plot([loop_x, lbl2_x + 0.035], [bar_y - 0.005, call_y + 0.015], color="#dc2626", lw=1.1, zorder=4)
+            ax.plot([loop_x, lbl2_x + 0.045], [bar_y - 0.005, call_y + 0.015], color="#dc2626", lw=1.1, zorder=4)
 
             ax.text(
                 bar_x + bar_w,
                 call_y,
-                f"{tok0:,} (Cap)",
+                f"Out at {tok0:,}",
                 ha="right",
                 va="center",
-                fontsize=6.7,
+                fontsize=7.2,
                 fontweight="bold",
                 color="#991b1b",
             )
@@ -1093,44 +1299,33 @@ def generate_hero_trace_chart(
             end_x = bar_x + w_used
             ax.add_patch(mpatches.Rectangle((bar_x, bar_y), w_used, bar_h, facecolor="#059669", edgecolor="none"))
             ax.plot([end_x, end_x], [bar_y - 0.005, bar_y + bar_h + 0.003], color="#047857", lw=1.8, zorder=5)
-            unused_center_x = bar_x + w_used + (bar_w - w_used) * 0.5
-            ax.text(
-                unused_center_x,
-                bar_y + bar_h / 2,
-                f"Solved in {tok1:,} tok — {32768 - tok1:,} saved ({100*(1-frac_used):.1f}% free)",
-                ha="center",
-                va="center",
-                fontsize=7.8,
-                fontweight="bold",
-                color="#065f46",
-            )
-            lbl_ok_x = bar_x + 0.004
+
+            lbl_ok_x = bar_x + 0.002
             ax.text(
                 lbl_ok_x,
                 call_y,
-                f"Finished </think> & \\boxed{{28}} @ tok {tok1:,}",
+                f"Finished at {tok1:,} tokens",
                 ha="left",
                 va="center",
-                fontsize=6.7,
+                fontsize=7.4,
                 fontweight="bold",
                 color="#065f46",
                 bbox=dict(boxstyle="round,pad=0.22", facecolor="#ecfdf5", edgecolor="#059669", lw=0.9),
-                parse_math=False,
             )
-            ax.plot([end_x, lbl_ok_x + 0.065], [bar_y - 0.005, call_y + 0.015], color="#059669", lw=1.1, zorder=4)
+            ax.plot([end_x, lbl_ok_x + 0.060], [bar_y - 0.005, call_y + 0.015], color="#059669", lw=1.1, zorder=4)
             ax.text(
                 bar_x + bar_w,
                 call_y,
-                "32,768 budget",
+                "32,768 limit",
                 ha="right",
                 va="center",
-                fontsize=6.7,
+                fontsize=7.2,
                 fontweight="bold",
                 color="#64748b",
             )
 
-        box_y = 0.21
-        box_h = 0.505
+        box_y = 0.165
+        box_h = 0.545
         term = mpatches.FancyBboxPatch(
             (bar_x, box_y),
             bar_w,
@@ -1142,29 +1337,87 @@ def generate_hero_trace_chart(
         )
         ax.add_patch(term)
 
-        cur_y = box_y + box_h - 0.020
-        line_step = 0.0322
-        for text_line, line_col, is_bold in transcript_lines:
-            ax.text(
-                bar_x + 0.009,
-                cur_y,
-                text_line,
-                fontsize=6.1,
-                fontfamily="monospace",
-                fontweight="bold" if is_bold else "normal",
-                color=line_col,
-                va="top",
-                parse_math=False,
-            )
-            cur_y -= line_step
+        cur_y = box_y + box_h - 0.036
+        for item in rich_lines:
+            kind = item.get("kind", "line")
+            if kind == "boxed_badge":
+                # Chat-app rendered final answer box ("28 ✓")
+                ans_card = mpatches.FancyBboxPatch(
+                    (bar_x + 0.014, cur_y - 0.056),
+                    0.135,
+                    0.068,
+                    boxstyle="square,pad=0.004",
+                    facecolor="#d1fae5",
+                    edgecolor="#047857",
+                    linewidth=2.2,
+                    zorder=4,
+                )
+                ax.add_patch(ans_card)
+                ax.text(
+                    bar_x + 0.0815,
+                    cur_y - 0.022,
+                    "28 ✓",
+                    ha="center",
+                    va="center",
+                    fontsize=13.5,
+                    fontweight="bold",
+                    color="#065f46",
+                    zorder=5,
+                )
+                cur_y -= 0.072
+                continue
 
-        pill_w = (bar_w - 0.014) / 2.0
-        pill_h = 0.068
+            bg_col = item.get("bg")
+            edge_col = item.get("edge")
+            row_h = float(item.get("h", 0.048))
+            if bg_col:
+                hl = mpatches.FancyBboxPatch(
+                    (bar_x + 0.008, cur_y - row_h * 0.52),
+                    bar_w - 0.016,
+                    row_h,
+                    boxstyle="round,pad=0.003,rounding_size=0.010",
+                    facecolor=bg_col,
+                    edgecolor=edge_col or "none",
+                    linewidth=0.9 if edge_col else 0.0,
+                    zorder=3,
+                )
+                ax.add_patch(hl)
+
+            spans = item["spans"]
+            fs = float(item.get("fs", 8.8))
+            col = str(item.get("col", "#1e293b"))
+            row_artists = _draw_rich_spans(
+                fig,
+                ax,
+                bar_x + 0.015,
+                cur_y,
+                spans,
+                fontsize=fs,
+                default_color=col,
+                fontfamily="sans-serif",
+                va="center",
+                zorder=4,
+            )
+            # If a single-span plain line is near the right border of the chat card, shrink slightly so it never clips
+            if len(row_artists) == 1 and spans[0][0] != "math":
+                fig.canvas.draw()
+                rend = fig.canvas.get_renderer()
+                bb = row_artists[0].get_window_extent(renderer=rend).transformed(ax.transAxes.inverted())
+                max_right = bar_x + bar_w - 0.014
+                if bb.x1 > max_right and (bb.x1 - bb.x0) > 0:
+                    avail_w = max_right - (bar_x + 0.015)
+                    row_artists[0].set_fontsize(fs * (avail_w / (bb.x1 - bb.x0)) * 0.98)
+
+            cur_y -= float(item.get("step", 0.060))
+
+        # 3 Stat Cards in plain words at bottom of each column
+        n_cards = len(metrics)
+        gap_w = 0.010
+        pill_w = (bar_w - gap_w * (n_cards - 1)) / n_cards
+        pill_h = 0.112
+        py = 0.040
         for idx_m, (m_label, m_val, m_col) in enumerate(metrics):
-            col_i = idx_m % 2
-            row_i = idx_m // 2
-            px = bar_x + col_i * (pill_w + 0.014)
-            py = 0.116 - row_i * (pill_h + 0.014)
+            px = bar_x + idx_m * (pill_w + gap_w)
             pill = mpatches.FancyBboxPatch(
                 (px, py),
                 pill_w,
@@ -1172,70 +1425,164 @@ def generate_hero_trace_chart(
                 boxstyle="round,pad=0.004,rounding_size=0.012",
                 facecolor=header_bg,
                 edgecolor=border_col,
-                linewidth=0.9,
+                linewidth=1.0,
             )
             ax.add_patch(pill)
-            ax.text(px + 0.010, py + pill_h * 0.67, m_label, fontsize=7.4, color="#475569", va="center")
-            ax.text(px + 0.010, py + pill_h * 0.28, m_val, fontsize=8.3, fontweight="bold", color=m_col, va="center")
+            lbl_art = ax.text(
+                px + pill_w / 2.0,
+                py + pill_h * 0.72,
+                m_label,
+                ha="center",
+                va="center",
+                fontsize=7.3,
+                fontweight="bold",
+                color="#475569",
+            )
+            val_art = ax.text(
+                px + pill_w / 2.0,
+                py + pill_h * 0.30,
+                m_val,
+                ha="center",
+                va="center",
+                fontsize=8.8,
+                fontweight="bold",
+                color=m_col,
+            )
+            for art in (lbl_art, val_art):
+                fig.canvas.draw()
+                rend = fig.canvas.get_renderer()
+                bb = art.get_window_extent(renderer=rend).transformed(ax.transAxes.inverted())
+                if (bb.x1 - bb.x0) > (pill_w - 0.012):
+                    art.set_fontsize(float(art.get_fontsize()) * ((pill_w - 0.012) / (bb.x1 - bb.x0)) * 0.97)
 
-    # 100% verbatim lines from r0["text"] and r1["text"], using "…" only for cuts
-    left_lines = [
-        ("Here's a thinking process that leads to the solution:", "#334155", False),
-        ("1.  **Analyze the Problem:**", "#0f172a", True),
-        ("    *   **Condition 1:** He wants *two* different toppings.", "#334155", False),
-        ("    *   **Condition 2:** There are *8* distinct toppings available in total.", "#334155", False),
-        ("…", "#64748b", False),
-        ("    *   So, $C(8, 2)$.", "#334155", False),
-        ("    *   Calculation: $\\frac{8 \\times 7}{2} = 28$.", "#b45309", True),
-        ("…", "#64748b", False),
-        ("    *   If the toppings are distinct, then {A,B} is a valid configuration.", "#475569", False),
-        ("    *   Wait, if toppings are distinct, then {A,B} is a valid configuration.", "#dc2626", True),
-        ("    *   Wait, if toppings are distinct, then {A,B} is a valid configuration.", "#dc2626", False),
-        ("    *   Wait, if toppings are distinct, then {A,B} is a valid configuration.", "#dc2626", False),
-        ("…", "#64748b", False),
-        ("    *   Wait,", "#7f1d1d", True),
+    # 8 clean, chat-app rendered verbatim lines per side (math rendered via mathtext, bold via fontweight, bullets via •)
+    left_rich_lines: List[Dict[str, Any]] = [
+        {
+            "spans": [("plain", "Here's a thinking process that leads to the solution:")],
+            "fs": 8.6,
+            "col": "#475569",
+            "step": 0.056,
+        },
+        {
+            "spans": [("bold", "1.  Analyze the Problem:")],
+            "fs": 9.2,
+            "col": "#0f172a",
+            "step": 0.056,
+        },
+        {
+            "spans": [("plain", "•  So, "), ("math", "C(8, 2)"), ("plain", ".")],
+            "fs": 9.2,
+            "col": "#334155",
+            "step": 0.068,
+        },
+        {
+            "spans": [("bold", "•  Calculation: "), ("math", r"\frac{8 \times 7}{2} = 28"), ("plain", ".")],
+            "fs": 9.6,
+            "col": "#92400e",
+            "bg": "#fef3c7",
+            "edge": "#f59e0b",
+            "h": 0.072,
+            "step": 0.076,
+        },
+        {
+            "spans": [("plain", "…")],
+            "fs": 9.5,
+            "col": "#64748b",
+            "step": 0.052,
+        },
+        {
+            "spans": [("bold", "•  Wait, if toppings are distinct, then {A,B} is a valid configuration.")],
+            "fs": 8.1,
+            "col": "#991b1b",
+            "bg": "#fee2e2",
+            "edge": "#f87171",
+            "h": 0.048,
+            "step": 0.058,
+        },
+        {
+            "spans": [("plain", "•  Wait, if toppings are distinct, then {A,B} is a valid configuration.")],
+            "fs": 8.1,
+            "col": "#b91c1c",
+            "bg": "#fee2e2",
+            "edge": "#fca5a5",
+            "h": 0.048,
+            "step": 0.058,
+        },
+        {
+            "spans": [("plain", "•  Wait, if toppings are distinct, then {A,B} is a valid configuration.")],
+            "fs": 8.1,
+            "col": "#b91c1c",
+            "bg": "#fee2e2",
+            "edge": "#fca5a5",
+            "h": 0.048,
+            "step": 0.058,
+        },
     ]
 
-    right_lines = [
-        ("Here's a thinking process that leads to the solution:", "#334155", False),
-        ("1.  **Analyze the Problem:**", "#0f172a", True),
-        ("    *   Goal: Calculate the number of different pizzas Mikka can order.", "#334155", False),
-        ("…", "#64748b", False),
-        ("    *   Total items ($n$) = 8.", "#334155", False),
-        ("    *   Items chosen ($k$) = 2.", "#334155", False),
-        ("    *   Formula: $\\binom{n}{k} = \\frac{n!}{k!(n-k)!}$", "#0f172a", True),
-        ("…", "#64748b", False),
-        ("</think>", "#047857", True),
-        ("**Step 3: Perform the Calculation**", "#0f172a", True),
-        ("$$ = \\frac{56}{2} $$", "#334155", False),
-        ("$$ = 28 $$", "#0f172a", True),
-        ("Thus, there are 28 different pizzas Mikka can order.", "#334155", False),
-        ("\\boxed{28}", "#059669", True),
+    right_rich_lines: List[Dict[str, Any]] = [
+        {
+            "spans": [("plain", "Here's a thinking process that leads to the solution:")],
+            "fs": 8.6,
+            "col": "#475569",
+            "step": 0.056,
+        },
+        {
+            "spans": [("bold", "1.  Analyze the Problem:")],
+            "fs": 9.2,
+            "col": "#0f172a",
+            "step": 0.054,
+        },
+        {
+            "spans": [("plain", "…")],
+            "fs": 9.5,
+            "col": "#64748b",
+            "step": 0.050,
+        },
+        {
+            "spans": [("bold", "Step 3: Perform the Calculation")],
+            "fs": 9.4,
+            "col": "#0f172a",
+            "step": 0.068,
+        },
+        {
+            "spans": [("plain", "    "), ("math", r"= \frac{8 \times 7}{2}")],
+            "fs": 10.2,
+            "col": "#1e293b",
+            "step": 0.076,
+        },
+        {
+            "spans": [("plain", "    "), ("math", r"= \frac{56}{2} = 28")],
+            "fs": 10.2,
+            "col": "#0f172a",
+            "step": 0.072,
+        },
+        {
+            "spans": [("bold", "Thus, there are 28 different pizzas Mikka can order.")],
+            "fs": 8.8,
+            "col": "#065f46",
+            "bg": "#d1fae5",
+            "edge": "#10b981",
+            "h": 0.052,
+            "step": 0.068,
+        },
+        {
+            "kind": "boxed_badge",
+        },
     ]
-
-    if t0:
-        for ln, _, _ in left_lines:
-            if ln != "…":
-                assert ln in t0, f"Base transcript line must be verbatim from JSONL: {ln!r}"
-    if t1:
-        for ln, _, _ in right_lines:
-            if ln != "…":
-                assert ln in t1, f"Edited transcript line must be verbatim from JSONL: {ln!r}"
 
     _draw_column(
         0.012,
         0.476,
-        header_title="Base Model (α = 0.0) — Trapped in Verbatim Loop",
+        header_title="Base model: stuck in a loop",
         header_bg="#fef2f2",
         border_col="#ef4444",
         title_col="#991b1b",
-        badge_text=f"0.00% edited  |  Wrote =28 @ tok {calc28_tok_val:,}, then looped tok {onset0_val:,}–{tok0:,} ({repeat_cnt:,}×)",
-        transcript_lines=left_lines,
+        sub_note=f"Reached 28 at token {calc28_tok_val:,}, then looped {repeat_cnt:,}× to the limit",
+        rich_lines=left_rich_lines,
         metrics=[
-            ("Generated Tokens", f"{tok0:,} / 32,768 (Capped)", "#b91c1c"),
-            ("Loop Onset / Repeats", f"Token {onset0_val:,} ({repeat_cnt:,}× loop)", "#b91c1c"),
-            ("8-Gram Repetition", f"{rep0_pct:.1f}% full (Tail: {tail0_pct:.1f}%)", "#b91c1c"),
-            ("Strict Grade (After </think>)", "None (Forced Pass-2: 28)", "#b91c1c"),
+            ("Tokens used", f"{tok0:,} (ran out)", "#b91c1c"),
+            ("Repeated text (last 240 words)", f"{tail0_pct:.1f}% ({repeat_cnt:,}× loop)", "#b91c1c"),
+            ("Final answer", "None (ran out)", "#b91c1c"),
         ],
         is_base=True,
     )
@@ -1243,21 +1590,31 @@ def generate_hero_trace_chart(
     _draw_column(
         0.512,
         0.476,
-        header_title="Published Edit (α = 1.0) — Clean Solve",
+        header_title=f"Edited model: solved in {tok1:,} tokens",
         header_bg="#ecfdf5",
         border_col="#10b981",
         title_col="#065f46",
-        badge_text="2 tensors (0.0150% weights)  |  finish_reason = stop  |  8.5x shorter",
-        transcript_lines=right_lines,
+        sub_note="Completed reasoning cleanly without looping",
+        rich_lines=right_rich_lines,
         metrics=[
-            ("Generated Tokens", f"{tok1:,} / 32,768 (Finished)", "#047857"),
-            ("Loop Onset / Repeats", "None detected (0× repeats)", "#047857"),
-            ("8-Gram Repetition", f"{rep1_pct:.2f}% full (Tail: {tail1_pct:.1f}%)", "#047857"),
-            ("Strict Grade (After </think>)", "Exact \\boxed{28} [PASS]", "#047857"),
+            ("Tokens used", f"{tok1:,} (finished)", "#047857"),
+            ("Repeated text (last 240 words)", f"{tail1_pct:.1f}% (no loop)", "#047857"),
+            ("Final answer", "28 ✓", "#047857"),
         ],
         is_base=False,
     )
 
+    fig.text(
+        0.5,
+        0.014,
+        HARDWARE_FOOTER_TEXT,
+        ha="center",
+        va="center",
+        fontsize=9.0,
+        color="#64748b",
+    )
+
+    validate_figure_no_raw_markup(fig, check_article_jargon=True)
     fig.savefig(target, dpi=DPI, bbox_inches=None)
     plt.close(fig)
     return str(target)
@@ -1287,9 +1644,9 @@ def _compute_outcome_breakdown(jsonl_gz_path: Path, tokenizer: Any = None) -> pd
         else:
             onset = _get_or_compute_loop_onset(rec, tokenizer=tokenizer)
             if onset is not None:
-                counts["Capped while looping"] += 1
+                counts["Ran out while looping"] += 1
             else:
-                counts["Capped not looping"] += 1
+                counts["Ran out, not looping"] += 1
 
     out_rows: List[Dict[str, Any]] = []
     for a_f in sorted(rows_by_alpha.keys()):
@@ -1337,7 +1694,7 @@ def _load_outcomes_core_and_dose(
                 counts["Wrong answer"] += 1
             else:
                 onset = _get_or_compute_loop_onset(rec, tokenizer=tokenizer)
-                counts["Capped while looping" if onset is not None else "Capped not looping"] += 1
+                counts["Ran out while looping" if onset is not None else "Ran out, not looping"] += 1
         d_rows: List[Dict[str, Any]] = []
         for a_f in sorted(rows_by_a.keys()):
             nt = tot_by_a[a_f]
@@ -1352,14 +1709,33 @@ def _load_outcomes_core_and_dose(
     return core_df, combined_dose_df
 
 
+def _format_core_model_xtick(alpha: float, *, multiline: bool = False) -> str:
+    if abs(alpha - 0.0) < 1e-6:
+        return "Base model"
+    if abs(alpha - 1.0) < 1e-6:
+        return "Edited\n(published)" if multiline else "Edited (published strength)"
+    if abs(alpha - 1.25) < 1e-6:
+        return "Edited\n(1.25×)" if multiline else "Edited (1.25× strength)"
+    return f"Edited ({alpha:g}×)"
+
+
+def _format_dose_xtick(alpha: float, *, multiline: bool = False) -> str:
+    if abs(alpha - 0.0) < 1e-6:
+        return "0×"
+    if abs(alpha - 1.0) < 1e-6:
+        return "1×\n(published)" if multiline else "1× (published)"
+    return f"{alpha:g}×"
+
+
 def _plot_outcome_bars(
     ax: Any,
     df_panel: pd.DataFrame,
     *,
-    bar_label_fontsize: float = 8.3,
-    xtick_fontsize: float = 9.8,
-    ytick_fontsize: float = 9.5,
-    ylabel_fontsize: float = 10.6,
+    xtick_formatter: Any = _format_core_model_xtick,
+    bar_label_fontsize: float = 8.6,
+    xtick_fontsize: float = 10.2,
+    ytick_fontsize: float = 9.8,
+    ylabel_fontsize: float = 11.0,
     show_ylabel: bool = True,
     add_legend_labels: bool = True,
 ) -> None:
@@ -1401,12 +1777,12 @@ def _plot_outcome_bars(
         bottom = bottom + vals
 
     ax.set_xticks(x)
-    ax.set_xticklabels([f"α = {a:g}\n({6*a:g}×)" for a in alphas], fontsize=xtick_fontsize, fontweight="bold")
+    ax.set_xticklabels([xtick_formatter(float(a)) for a in alphas], fontsize=xtick_fontsize, fontweight="bold")
     ax.set_ylim(0, 105)
     ax.set_yticks([0, 20, 40, 60, 80, 100])
     ax.set_yticklabels([f"{v}%" for v in (0, 20, 40, 60, 80, 100)], fontsize=ytick_fontsize)
     if show_ylabel:
-        ax.set_ylabel("Share of MATH-500 Problems (%)", fontsize=ylabel_fontsize, fontweight="bold", color="#0f172a")
+        ax.set_ylabel("Share of problems (%)", fontsize=ylabel_fontsize, fontweight="bold", color="#0f172a")
     ax.grid(True, axis="y", linestyle="--", alpha=0.35, color="#cbd5e1", zorder=1)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -1418,7 +1794,7 @@ def generate_outcomes_32k_chart(
     out_path: Union[str, Path] = "assets/article/outcomes_32k.png",
     tokenizer: Any = None,
 ) -> str:
-    """3. Outcome Breakdown at 32k (2-Panel Overview): Correct / Wrong answer / Capped looping / Capped not looping."""
+    """3. Outcome Breakdown at 32k (2-Panel Overview): Correct / Wrong answer / Ran out while looping / Ran out, not looping."""
     root = Path(assets_root)
     target = Path(out_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1435,25 +1811,43 @@ def generate_outcomes_32k_chart(
             gridspec_kw={"width_ratios": [1.0, 1.55]},
         )
         axes_to_plot = [
-            (ax1, core_df, f"A. Core Cohort (N={int(core_df['n_total'].max()) if not core_df.empty else 200})"),
-            (ax2, combined_dose_df, f"B. Paired 6-Dose Sweep (Same N={int(combined_dose_df['n_total'].max())})"),
+            (
+                ax1,
+                core_df,
+                lambda a: _format_core_model_xtick(a, multiline=True),
+                f"A. Main Comparison ({int(core_df['n_total'].max()) if not core_df.empty else 200} problems)",
+            ),
+            (
+                ax2,
+                combined_dose_df,
+                lambda a: _format_dose_xtick(a, multiline=True),
+                f"B. Edit Strength Sweep ({int(combined_dose_df['n_total'].max())} problems)",
+            ),
         ]
     else:
         fig, ax1 = plt.subplots(figsize=(FIG_W_IN, FIG_H_IN), dpi=DPI)
         axes_to_plot = [
-            (ax1, core_df, f"32,768-Token Outcome Breakdown (N={int(core_df['n_total'].max()) if not core_df.empty else 50})"),
+            (
+                ax1,
+                core_df,
+                lambda a: _format_core_model_xtick(a, multiline=True),
+                f"What happened at 32k tokens ({int(core_df['n_total'].max()) if not core_df.empty else 50} problems)",
+            ),
         ]
 
     fig.patch.set_facecolor("#ffffff")
 
-    for panel_idx, (ax, df_panel, subtitle) in enumerate(axes_to_plot):
+    for panel_idx, (ax, df_panel, x_fmt, subtitle) in enumerate(axes_to_plot):
         _plot_outcome_bars(
             ax,
             df_panel,
+            xtick_formatter=x_fmt,
             show_ylabel=(panel_idx == 0),
             add_legend_labels=(panel_idx == 0),
         )
-        ax.set_title(subtitle, fontsize=11.3, fontweight="bold", color="#0f172a", pad=8)
+        ax.set_title(subtitle, fontsize=11.5, fontweight="bold", color="#0f172a", pad=8)
+        if panel_idx == 1:
+            ax.set_xlabel("Edit strength", fontsize=10.8, fontweight="bold", labelpad=5, color="#0f172a")
 
     handles, labels = axes_to_plot[0][0].get_legend_handles_labels()
     fig.legend(
@@ -1462,33 +1856,45 @@ def generate_outcomes_32k_chart(
         loc="upper center",
         bbox_to_anchor=(0.5, 0.885),
         ncol=4,
-        fontsize=9.2,
+        fontsize=9.6,
         frameon=True,
         facecolor="#f8fafc",
         edgecolor="#cbd5e1",
     )
 
     fig.suptitle(
-        "What Happens at 32,768 Tokens: Fewer Loops, More Finished Answers",
-        fontsize=14.2,
+        "What happens at 32k tokens: fewer loops, more finished answers",
+        fontsize=15.0,
         fontweight="bold",
         color="#0f172a",
         y=0.968,
     )
     if has_two_panels:
-        fig.text(
+        sub_overview = fig.text(
             0.5,
             0.916,
-            "More edit cuts looping (91% → 17% on N=100) while finished-wrong rises (9% @ 0.75, 21% @ 1.0, 32% @ 1.5); α = 0.75 / 1.0 / 1.25 are within noise (p = 0.14 for 0.75 vs 1.0)",
+            "Stronger edits cut looping (91% → 17%) while wrong answers rise (9% at 0.75×, 21% at 1×, 32% at 1.5×)",
             ha="center",
             va="center",
-            fontsize=8.0,
+            fontsize=9.5,
             color="#475569",
         )
-        fig.subplots_adjust(left=0.075, right=0.985, top=0.76, bottom=0.13, wspace=0.14)
+        _fit_text_to_width(fig, sub_overview, max_width_frac=0.93, min_fontsize=8.0)
+        fig.subplots_adjust(left=0.075, right=0.985, top=0.76, bottom=0.165, wspace=0.14)
     else:
-        fig.subplots_adjust(left=0.075, right=0.97, top=0.79, bottom=0.13)
+        fig.subplots_adjust(left=0.075, right=0.97, top=0.79, bottom=0.165)
 
+    fig.text(
+        0.5,
+        0.024,
+        HARDWARE_FOOTER_TEXT,
+        ha="center",
+        va="center",
+        fontsize=9.0,
+        color="#64748b",
+    )
+
+    validate_figure_no_raw_markup(fig, check_article_jargon=True)
     fig.savefig(target, dpi=DPI, bbox_inches=None)
     plt.close(fig)
     return str(target)
@@ -1509,19 +1915,24 @@ def generate_outcomes_32k_single_chart(
         df_use = combined_dose_df if not combined_dose_df.empty else core_df
         default_out = root / "article/outcomes_dose.png"
         n_val = int(df_use["n_total"].max()) if not df_use.empty else 100
-        title_str = f"Paired 6-Dose Sweep at 32,768 Tokens (Same N = {n_val})"
+        title_str = f"Turning the edit up: fewer loops, more wrong answers ({n_val} problems, 32k)"
         subtitle_str = (
-            "Differences among α = 0.75 / 1.0 / 1.25 are within noise (McNemar p = 0.14 for 0.75 vs 1.0;\n"
-            "p = 0.38 for 1.5 vs 1.0; only 0.5 → 0.75 is significant, p = 0.00009)"
+            "0.75×, 1× and 1.25× are statistically tied; only the jump from 0.5× to 0.75× is significant"
         )
+        x_fmt = _format_dose_xtick
+        xtick_fs = 12.2
+        xlabel_txt = "Edit strength"
     else:
         df_use = core_df
         default_out = root / "article/outcomes_32k_core.png"
         n_val = int(df_use["n_total"].max()) if not df_use.empty else 200
-        title_str = f"32,768-Token Outcomes on Core Cohort (N = {n_val})"
+        title_str = f"What happened to all {n_val} problems at 32k tokens"
         subtitle_str = (
-            "Looping drops from 89.5% to 25.5%; cap hits from 91.5% to 29.5%"
+            "Looping drops from 89.5% to 25.5%; ran out of tokens drops from 91.5% to 29.5%"
         )
+        x_fmt = lambda a: _format_core_model_xtick(a, multiline=False)
+        xtick_fs = 13.5
+        xlabel_txt = None
 
     target = Path(out_path) if out_path is not None else default_out
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1532,13 +1943,16 @@ def generate_outcomes_32k_single_chart(
     _plot_outcome_bars(
         ax,
         df_use,
+        xtick_formatter=x_fmt,
         bar_label_fontsize=13.5,
-        xtick_fontsize=13.5,
+        xtick_fontsize=xtick_fs,
         ytick_fontsize=13.0,
         ylabel_fontsize=14.0,
         show_ylabel=True,
         add_legend_labels=True,
     )
+    if xlabel_txt:
+        ax.set_xlabel(xlabel_txt, fontsize=13.5, fontweight="bold", labelpad=5, color="#0f172a")
 
     handles, labels = ax.get_legend_handles_labels()
     fig.legend(
@@ -1547,19 +1961,21 @@ def generate_outcomes_32k_single_chart(
         loc="upper center",
         bbox_to_anchor=(0.5, 0.822),
         ncol=4,
-        fontsize=12.6,
+        fontsize=12.4,
         frameon=True,
         facecolor="#f8fafc",
         edgecolor="#cbd5e1",
     )
 
-    fig.suptitle(
+    sup_t = fig.suptitle(
         title_str,
-        fontsize=17.2,
+        fontsize=17.4,
         fontweight="bold",
         color="#0f172a",
         y=0.972,
     )
+    _fit_text_to_width(fig, sup_t, max_width_frac=0.95, min_fontsize=13.0)
+
     sub_t = fig.text(
         0.5,
         0.892,
@@ -1569,14 +1985,20 @@ def generate_outcomes_32k_single_chart(
         fontsize=13.0,
         color="#475569",
     )
+    _fit_text_to_width(fig, sub_t, max_width_frac=0.94, min_fontsize=10.5)
 
-    fig.subplots_adjust(left=0.09, right=0.975, top=0.720, bottom=0.145)
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-    max_sub_w = fig.get_window_extent(renderer=renderer).width * 0.92
-    sub_bb = sub_t.get_window_extent(renderer=renderer)
-    if sub_bb.width > max_sub_w:
-        sub_t.set_fontsize(sub_t.get_fontsize() * (max_sub_w / sub_bb.width))
+    fig.text(
+        0.5,
+        0.025,
+        HARDWARE_FOOTER_TEXT,
+        ha="center",
+        va="center",
+        fontsize=9.2,
+        color="#64748b",
+    )
+
+    fig.subplots_adjust(left=0.09, right=0.975, top=0.720, bottom=0.160)
+    validate_figure_no_raw_markup(fig, check_article_jargon=True)
     fig.savefig(target, dpi=DPI, bbox_inches=None)
     plt.close(fig)
     return str(target)
@@ -1664,6 +2086,7 @@ def _render_loop_onset_impl(
 
             cap_arr = np.array(cap_pcts)
             fin_arr = np.array(fin_pcts)
+            model_short = _format_core_model_xtick(float(a_val), multiline=False).replace(" strength", "")
             ax1.bar(
                 x_cats + offset,
                 cap_arr,
@@ -1672,7 +2095,7 @@ def _render_loop_onset_impl(
                 alpha=0.92,
                 edgecolor="#ffffff",
                 lw=0.7,
-                label=f"α = {a_val:g} — Capped (solid)",
+                label=f"{model_short} — ran out (solid)",
                 zorder=3,
             )
             ax1.bar(
@@ -1685,20 +2108,20 @@ def _render_loop_onset_impl(
                 hatch="///",
                 edgecolor=col,
                 lw=0.8,
-                label=f"α = {a_val:g} — Finished (hatched)",
+                label=f"{model_short} — finished (hatched)",
                 zorder=3,
             )
 
         ax1.set_xticks(x_cats)
-        ax1.set_xticklabels([b[2] for b in bins] + ["No Loop\nDetected"], fontsize=9.2, fontweight="bold")
+        ax1.set_xticklabels([b[2] for b in bins] + ["Never\nLooped"], fontsize=9.5, fontweight="bold")
         ax1.set_ylim(0, 92)
-        ax1.set_ylabel("Share of All Traces (%)", fontsize=10.5, fontweight="bold", color="#0f172a")
-        ax1.set_xlabel("Loop Onset Window (1024-tok window, >50% repeated 8-grams)", fontsize=9.8, fontweight="bold", color="#0f172a")
-        ax1.set_title("A. When Loops Start (Solid = Hit Cap, Hatched = Recovered)", fontsize=10.8, fontweight="bold", color="#0f172a", pad=8)
+        ax1.set_ylabel("Share of all problems (%)", fontsize=11.0, fontweight="bold", color="#0f172a")
+        ax1.set_xlabel("Token range where loop begins", fontsize=10.2, fontweight="bold", color="#0f172a")
+        ax1.set_title("A. When loops start (solid = ran out, hatched = escaped)", fontsize=10.5, fontweight="bold", color="#0f172a", pad=8)
         ax1.grid(True, axis="y", linestyle="--", alpha=0.35, color="#cbd5e1")
         ax1.spines["top"].set_visible(False)
         ax1.spines["right"].set_visible(False)
-        ax1.legend(loc="upper left", fontsize=7.8, ncol=1, frameon=True, facecolor="#ffffff", edgecolor="#cbd5e1")
+        ax1.legend(loc="upper left", fontsize=8.0, ncol=1, frameon=True, facecolor="#ffffff", edgecolor="#cbd5e1")
 
     rng = np.random.default_rng(42)
     for i_a, a_val in enumerate(alphas):
@@ -1718,21 +2141,20 @@ def _render_loop_onset_impl(
                 marker="o",
                 edgecolors="#ffffff",
                 linewidths=0.5,
-                label="Capped trace (●)" if i_a == 0 else None,
                 zorder=4,
             )
             med_c = float(np.median(capped_vals))
             ax2.hlines(med_c, i_a - 0.18, i_a + 0.18, color="#0f172a", lw=2.8 if phone_scatter_only else 2.2, zorder=6)
             ax2.text(
                 i_a,
-                med_c + (900 if phone_scatter_only else 650),
-                f"med {med_c/1000:.1f}k",
+                med_c + (1000 if phone_scatter_only else 700),
+                f"median start, ran out: {med_c/1000:.1f}k",
                 ha="center",
                 va="bottom",
-                fontsize=12.8 if phone_scatter_only else 8.0,
+                fontsize=11.0 if phone_scatter_only else 7.1,
                 fontweight="bold",
                 color="#0f172a",
-                bbox=dict(boxstyle="round,pad=0.22", facecolor="#ffffff", edgecolor=col, lw=1.1, alpha=0.95),
+                bbox=dict(boxstyle="round,pad=0.20", facecolor="#ffffff", edgecolor=col, lw=1.1, alpha=0.96),
                 zorder=7,
             )
 
@@ -1747,77 +2169,124 @@ def _render_loop_onset_impl(
                 marker="D",
                 edgecolors=col,
                 linewidths=1.8 if phone_scatter_only else 1.4,
-                label=(
-                    "Escaped loop / finished (◇)"
-                    if any(len(df[(df["alpha"] == a) & df["loop_onset_token"].notna() & (~df["hit_cap"])]) > 0 for a in alphas[: i_a + 1])
-                    and i_a == next((idx for idx, a in enumerate(alphas) if len(df[(df["alpha"] == a) & df["loop_onset_token"].notna() & (~df["hit_cap"])]) > 0), -1)
-                    else None
-                ),
                 zorder=5,
             )
 
+    # Neutral gray legend markers so both shapes clearly mean ran-out vs escaped across all colors
+    ax2.scatter(
+        [],
+        [],
+        color="#64748b",
+        s=54 if phone_scatter_only else 36,
+        marker="o",
+        edgecolors="#ffffff",
+        linewidths=0.6,
+        label="Loop, ran out of tokens",
+    )
+    ax2.scatter(
+        [],
+        [],
+        color="#ffffff",
+        s=62 if phone_scatter_only else 42,
+        marker="D",
+        edgecolors="#64748b",
+        linewidths=1.9,
+        label="Loop, escaped and finished",
+    )
+
     ax2.set_xticks(range(len(alphas)))
+    ax2.set_xlim(
+        -0.48 if phone_scatter_only else -0.56,
+        max(len(alphas) - 1, 2) + (0.52 if phone_scatter_only else 0.68),
+    )
     ax2.set_xticklabels(
         [
-            f"α = {a:g}\n({df[(df['alpha']==a) & df['loop_onset_token'].notna()].shape[0]}/{df[df['alpha']==a].shape[0]} looped)"
+            f"{_format_core_model_xtick(float(a), multiline=(not phone_scatter_only)).replace(' strength', '')}\n({df[(df['alpha']==a) & df['loop_onset_token'].notna()].shape[0]}/{df[df['alpha']==a].shape[0]} looped)"
             for a in alphas
         ],
-        fontsize=13.0 if phone_scatter_only else 9.2,
+        fontsize=12.4 if phone_scatter_only else 8.4,
         fontweight="bold",
     )
     ax2.set_ylim(-1500, 39200)
     ax2.set_yticks([0, 8192, 16384, 24576, 32768])
-    ax2.set_yticklabels(["0", "8,192 (8k)", "16,384 (16k)", "24,576 (24k)", "32,768 (32k)"], fontsize=12.8 if phone_scatter_only else 9.0)
-    ax2.set_ylabel("Loop Onset Token Position", fontsize=14.0 if phone_scatter_only else 10.5, fontweight="bold", color="#0f172a")
-    ax2.set_xlabel("Blend Coefficient α (Looped / Total Traces)", fontsize=13.5 if phone_scatter_only else 9.8, fontweight="bold", color="#0f172a")
+    ax2.set_yticklabels(["0", "8,192 (8k)", "16,384 (16k)", "24,576 (24k)", "32,768 (32k)"], fontsize=12.6 if phone_scatter_only else 9.0)
+    ax2.set_ylabel("Where the loop starts (token)", fontsize=14.0 if phone_scatter_only else 10.8, fontweight="bold", color="#0f172a")
     ax2.grid(True, axis="y", linestyle="--", alpha=0.35, color="#cbd5e1")
     ax2.spines["top"].set_visible(False)
     ax2.spines["right"].set_visible(False)
 
-    # Compute exact loop & escaped counts for caption line
-    s0 = df[df["alpha"] == 0.0] if not df.empty else pd.DataFrame()
-    s1 = df[df["alpha"] == 1.0] if not df.empty else pd.DataFrame()
-    n0 = len(s0)
-    n1 = len(s1)
-    l0 = int(s0["loop_onset_token"].notna().sum()) if n0 else 179
-    e0 = int((s0["loop_onset_token"].notna() & (~s0["hit_cap"])).sum()) if n0 else 0
-    l1 = int(s1["loop_onset_token"].notna().sum()) if n1 else 66
-    e1 = int((s1["loop_onset_token"].notna() & (~s1["hit_cap"])).sum()) if n1 else 39
-    caption_line = f"Loops: {l0}/{n0 or 200} base ({e0} escaped) vs {l1}/{n1 or 200} edited ({e1} escaped)"
+    # Compute exact loop & escaped counts for subtitle line
+    def _counts_for(alpha_val: float, def_l: int, def_e: int) -> Tuple[int, int, int]:
+        sub_a = df[df["alpha"] == alpha_val] if not df.empty else pd.DataFrame()
+        n_a = len(sub_a)
+        if not n_a:
+            return def_l, 200, def_e
+        l_a = int(sub_a["loop_onset_token"].notna().sum())
+        e_a = int((sub_a["loop_onset_token"].notna() & (~sub_a["hit_cap"])).sum())
+        return l_a, n_a, e_a
+
+    l0, n0, e0 = _counts_for(0.0, 179, 0)
+    l1, n1, e1 = _counts_for(1.0, 66, 39)
+    l125, n125, e125 = _counts_for(1.25, 51, 26)
+    caption_line = (
+        f"Base: {l0}/{n0} looped, {e0} escaped · Edited: {l1}/{n1} looped, {e1} escaped · "
+        f"Edited 1.25×: {l125}/{n125} looped, {e125} escaped"
+    )
 
     if phone_scatter_only:
-        ax2.legend(loc="upper left", fontsize=13.0, frameon=True, facecolor="#ffffff", edgecolor="#cbd5e1", framealpha=0.96)
+        ax2.legend(loc="upper left", fontsize=12.6, frameon=True, facecolor="#ffffff", edgecolor="#cbd5e1", framealpha=0.96)
         fig.suptitle(
-            "Edited traces loop far less often — and escape when they do",
-            fontsize=17.2,
+            "With the edit, loops are rarer and start later",
+            fontsize=17.8,
             fontweight="bold",
             color="#0f172a",
             y=0.965,
         )
-        fig.text(
+        sub_l = fig.text(
             0.5,
             0.902,
             caption_line,
             ha="center",
             va="center",
-            fontsize=13.8,
+            fontsize=12.4,
             fontweight="bold",
-            color="#0f172a",
+            color="#334155",
         )
-        fig.subplots_adjust(left=0.165, right=0.975, top=0.845, bottom=0.165)
+        _fit_text_to_width(fig, sub_l, max_width_frac=0.94, min_fontsize=9.5)
+        fig.text(
+            0.5,
+            0.025,
+            HARDWARE_FOOTER_TEXT,
+            ha="center",
+            va="center",
+            fontsize=9.2,
+            color="#64748b",
+        )
+        fig.subplots_adjust(left=0.165, right=0.975, top=0.845, bottom=0.175)
     else:
-        ax2.set_title("B. Onset Position: Capped (●) vs. Escaped (◇)", fontsize=10.6, fontweight="bold", color="#0f172a", pad=8)
-        ax2.legend(loc="upper left", fontsize=8.3, frameon=True, facecolor="#ffffff", edgecolor="#cbd5e1")
+        ax2.set_title("B. When each loop begins", fontsize=10.5, fontweight="bold", color="#0f172a", pad=8)
+        ax2.legend(loc="upper left", fontsize=8.5, frameon=True, facecolor="#ffffff", edgecolor="#cbd5e1")
         fig.suptitle(
-            f"Loop Onset Shift Across 32,768-Token Traces (RTX PRO 6000 bf16, N={n_core} per α)",
-            fontsize=14.2,
+            "With the edit, loops are rarer and start later",
+            fontsize=15.5,
             fontweight="bold",
             color="#0f172a",
             y=0.965,
         )
-        fig.text(0.5, 0.915, caption_line, ha="center", va="center", fontsize=10.0, fontweight="bold", color="#334155")
-        fig.subplots_adjust(left=0.065, right=0.98, top=0.85, bottom=0.14, wspace=0.28)
+        sub_lf = fig.text(0.5, 0.912, caption_line, ha="center", va="center", fontsize=10.2, fontweight="bold", color="#334155")
+        _fit_text_to_width(fig, sub_lf, max_width_frac=0.94, min_fontsize=8.5)
+        fig.text(
+            0.5,
+            0.022,
+            HARDWARE_FOOTER_TEXT,
+            ha="center",
+            va="center",
+            fontsize=9.0,
+            color="#64748b",
+        )
+        fig.subplots_adjust(left=0.068, right=0.985, top=0.845, bottom=0.16, wspace=0.33)
 
+    validate_figure_no_raw_markup(fig, check_article_jargon=True)
     fig.savefig(target, dpi=DPI, bbox_inches=None)
     plt.close(fig)
     return str(target)
@@ -1829,7 +2298,7 @@ def generate_loop_onset_chart(
     out_path: Union[str, Path] = "assets/article/loop_onset.png",
     tokenizer: Any = None,
 ) -> str:
-    """4. Loop Onset Scatter (Phone Version): Onset position scatter with medians 6.1k / 18.4k / 22.8k."""
+    """4. Loop Onset Scatter (Phone Version): Onset position scatter with verified medians."""
     return _render_loop_onset_impl(
         assets_root=assets_root,
         out_path=out_path,
@@ -1858,7 +2327,7 @@ def generate_edit_diagram(
     assets_root: Union[str, Path] = "assets",
     out_path: Union[str, Path] = "assets/article/edit_diagram.png",
 ) -> str:
-    """5. Architectural & Rank-1 Mechanism Diagram of the 2-Tensor Weight-Space Edit."""
+    """5. Architectural & Rank-1 Mechanism Diagram of the 2-Block Weight-Space Edit."""
     root = Path(assets_root)
     target = Path(out_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1868,7 +2337,6 @@ def generate_edit_diagram(
     total_params = int(ver.get("total_parameters", 873438784))
     touched_entries = int(ver.get("total_touched_entries", 131072))
     pct_touched = (touched_entries / total_params) * 100.0
-    cos_sim = float(ver.get("u15_u19_cosine_similarity", 0.8490))
     tensors = ver.get("tensors", {})
     t15 = tensors.get("model.language_model.layers.15.mlp.down_proj.weight", {})
     t19 = tensors.get("model.language_model.layers.19.mlp.down_proj.weight", {})
@@ -1885,23 +2353,24 @@ def generate_edit_diagram(
     ax.axis("off")
 
     fig.suptitle(
-        "2 of 488 tensors, 131,072 weights, one direction (rank-1)",
-        fontsize=16.5,
+        "Only 2 of 488 weight blocks changed",
+        fontsize=18.5,
         fontweight="bold",
         color="#0f172a",
         y=0.965,
     )
-    fig.text(
+    sub_e = fig.text(
         0.5,
         0.902,
-        f"{pct_touched:.4f}% of the 873.4M-parameter checkpoint (the paper rounds to 0.016% of '0.8 billion')",
+        f"{touched_entries:,} weights = {pct_touched:.3f}% of the model (the paper rounds to 0.016%)",
         ha="center",
         va="center",
-        fontsize=12.8,
+        fontsize=13.2,
         color="#334155",
     )
+    _fit_text_to_width(fig, sub_e, max_width_frac=0.94, min_fontsize=10.5)
 
-    # Box 1: Full Model Overview (simplified for phone, big fonts)
+    # Box 1: Full Model Overview
     b1 = mpatches.FancyBboxPatch(
         (0.02, 0.72),
         0.96,
@@ -1912,12 +2381,12 @@ def generate_edit_diagram(
         linewidth=1.8,
     )
     ax.add_patch(b1)
-    ax.text(0.05, 0.875, "Qwen3.5-0.8B · 488 Tensors (873.4M weights)", fontsize=13.4, fontweight="bold", color="#0f172a")
+    ax.text(0.05, 0.875, "Qwen3.5-0.8B · 488 weight blocks (873.4M weights)", fontsize=13.2, fontweight="bold", color="#0f172a")
     ax.text(
         0.05,
         0.775,
-        "486 / 488 tensors bit-identical · only 2 MLPs edited",
-        fontsize=12.6,
+        "486 unchanged · only 2 layers edited",
+        fontsize=12.8,
         fontweight="bold",
         color="#047857",
     )
@@ -1926,12 +2395,12 @@ def generate_edit_diagram(
     ax.annotate("", xy=(0.25, 0.65), xytext=(0.34, 0.72), arrowprops=dict(arrowstyle="->", color="#2563eb", lw=2.6))
     ax.annotate("", xy=(0.75, 0.65), xytext=(0.66, 0.72), arrowprops=dict(arrowstyle="->", color="#059669", lw=2.6))
 
-    # Box 2A & Box 2B: Layer 15 & Layer 19 (simplified, big fonts)
+    # Box 2A & Box 2B: Layer 15 & Layer 19
     for bx, bw, title, r_val, col, bg in (
         (
             0.02,
             0.46,
-            "Layer 15 · down_proj",
+            "Layer 15",
             ratio15,
             "#2563eb",
             "#eff6ff",
@@ -1939,7 +2408,7 @@ def generate_edit_diagram(
         (
             0.52,
             0.46,
-            "Layer 19 · down_proj",
+            "Layer 19",
             ratio19,
             "#059669",
             "#ecfdf5",
@@ -1955,11 +2424,11 @@ def generate_edit_diagram(
             linewidth=2.0,
         )
         ax.add_patch(card)
-        ax.text(bx + 0.025, 0.565, title, fontsize=12.8, fontweight="bold", color="#0f172a")
-        ax.text(bx + 0.025, 0.470, "64 / 3,584 cols edited", fontsize=12.2, fontweight="bold", color=col)
-        ax.text(bx + 0.025, 0.380, f"Rank-1: σ₁/σ₂ = {r_val:,.0f}×", fontsize=12.2, fontweight="bold", color="#0f172a")
+        ax.text(bx + 0.024, 0.565, title, fontsize=14.0, fontweight="bold", color="#0f172a")
+        ax.text(bx + 0.024, 0.470, "64 of 3,584 columns changed", fontsize=10.2, fontweight="bold", color=col)
+        ax.text(bx + 0.024, 0.380, f"Top direction is {r_val:,.0f}× larger", fontsize=10.2, fontweight="bold", color="#0f172a")
 
-    # Box 3: Equation & Blend (simplified, big fonts)
+    # Box 3: Plain-English Rank-1 Explanation & Dial Equation
     b3 = mpatches.FancyBboxPatch(
         (0.02, 0.03),
         0.96,
@@ -1973,59 +2442,51 @@ def generate_edit_diagram(
     ax.text(
         0.05,
         0.205,
-        "ΔW = −6 u_ℓ (u_ℓᵀ W_base ⊙ 1₆₄)",
-        fontsize=13.2,
+        "Each edit points in a single direction (rank-1)",
+        fontsize=13.0,
         fontweight="bold",
         color="#0f172a",
     )
     ax.text(
         0.05,
         0.095,
-        f"W(α) = W_base + α ΔW   |   cos(u₁₅, u₁₉) = {cos_sim:.2f}",
-        fontsize=12.4,
+        r"$W(\mathrm{strength}) = W_{\mathrm{base}} + \mathrm{strength} \times (W_{\mathrm{edit}} - W_{\mathrm{base}})$",
+        fontsize=12.6,
         fontweight="bold",
         color="#92400e",
+        parse_math=True,
     )
 
-    # Right Subplot: Actual SVD Singular Value Spectrum (log scale)
-    ax_svd = fig.add_axes([0.685, 0.14, 0.295, 0.68])
+    # Right Subplot: Compact Singular-Value Spectrum (log scale)
+    ax_svd = fig.add_axes([0.695, 0.16, 0.285, 0.65])
     ax_svd.set_facecolor("#ffffff")
     ranks = [1, 2, 3, 4, 5]
-    ax_svd.plot(ranks, sv15, marker="o", ms=8.5, lw=2.8, color="#2563eb", label=f"Layer 15 (σ₁/σ₂ = {ratio15:,.0f}×)")
-    ax_svd.plot(ranks, sv19, marker="s", ms=8.5, lw=2.8, color="#059669", label=f"Layer 19 (σ₁/σ₂ = {ratio19:,.0f}×)")
+    ax_svd.plot(ranks, sv15, marker="o", ms=8.5, lw=2.8, color="#2563eb", label=f"Layer 15 ({ratio15:,.0f}×)")
+    ax_svd.plot(ranks, sv19, marker="s", ms=8.5, lw=2.8, color="#059669", label=f"Layer 19 ({ratio19:,.0f}×)")
     ax_svd.set_yscale("log")
     ax_svd.set_xticks(ranks)
-    ax_svd.set_xticklabels([f"σ{r}" for r in ranks], fontsize=12.0, fontweight="bold")
+    ax_svd.set_xticklabels([f"#{r}" for r in ranks], fontsize=11.5, fontweight="bold")
     ax_svd.set_ylim(2e-4, 6.0)
-    ax_svd.set_ylabel("Singular Value of ΔW (log)", fontsize=12.0, fontweight="bold", color="#0f172a")
-    ax_svd.set_xlabel("Singular Value Index", fontsize=12.0, fontweight="bold", color="#0f172a")
-    ax_svd.set_title("Rank-1 Spectrum of ΔW", fontsize=13.0, fontweight="bold", color="#0f172a", pad=8)
+    ax_svd.set_ylabel("Size of each direction (log)", fontsize=11.8, fontweight="bold", color="#0f172a")
+    ax_svd.set_xlabel("Direction number", fontsize=11.8, fontweight="bold", color="#0f172a")
+    ax_svd.set_title("One direction dominates", fontsize=13.0, fontweight="bold", color="#0f172a", pad=8)
     ax_svd.grid(True, which="both", linestyle="--", alpha=0.35, color="#cbd5e1")
     ax_svd.spines["top"].set_visible(False)
     ax_svd.spines["right"].set_visible(False)
-    ax_svd.legend(loc="upper right", fontsize=10.5, frameon=True, facecolor="#ffffff", edgecolor="#cbd5e1")
+    ax_svd.legend(loc="upper right", fontsize=10.2, frameon=True, facecolor="#ffffff", edgecolor="#cbd5e1")
 
     ax_svd.annotate(
-        f"σ₁ = {sv15[0]:.2f} / {sv19[0]:.2f}\n(99.999% energy)",
+        f"{ratio15:,.0f}× and {ratio19:,.0f}×\nlarger than #2",
         xy=(1.04, sv15[0] * 0.90),
         xytext=(1.55, 0.36),
-        fontsize=10.5,
+        fontsize=10.2,
         fontweight="bold",
         color="#0f172a",
         arrowprops=dict(arrowstyle="->", color="#475569", lw=1.2),
         bbox=dict(boxstyle="round,pad=0.25", facecolor="#ffffff", edgecolor="#94a3b8", lw=0.9),
     )
-    ax_svd.annotate(
-        "σ₂..σ₅ ≤ 0.001\n(>1,550× smaller)",
-        xy=(3, sv15[2]),
-        xytext=(1.95, 0.0058),
-        fontsize=10.2,
-        fontweight="bold",
-        color="#334155",
-        arrowprops=dict(arrowstyle="->", color="#64748b", lw=1.2),
-        bbox=dict(boxstyle="round,pad=0.25", facecolor="#f8fafc", edgecolor="#cbd5e1", lw=0.9),
-    )
 
+    validate_figure_no_raw_markup(fig, check_article_jargon=True)
     fig.savefig(target, dpi=DPI, bbox_inches=None)
     plt.close(fig)
     return str(target)
