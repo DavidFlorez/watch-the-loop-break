@@ -222,6 +222,76 @@ class TestMetricsAndGrading(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", rendered)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
 
+    def test_app_katex_and_markdown_formatting(self) -> None:
+        from app import (
+            format_gold_for_display,
+            format_problem_for_display,
+            format_stream_for_display,
+        )
+
+        prob = format_problem_for_display(r"Find \(\frac{8 \times 7}{2}\) and put it in \boxed{28}.")
+        self.assertNotIn(r"\(", prob)
+        self.assertNotIn(r"\)", prob)
+        self.assertIn(r"$\frac{8 \times 7}{2}$", prob)
+        self.assertIn(r"$\boxed{28}$", prob)
+
+        gold = format_gold_for_display(r"\left( 3, \frac{\pi}{2} \right)")
+        self.assertIn("$$\n\\boxed{\\left( 3, \\frac{\\pi}{2} \\right)}\n$$", gold)
+
+        raw_stream = (
+            "<think>\n"
+            "Let us compute:\n"
+            "\\[ C(8, 2) = \\frac{8 \\times 7}{2} = 28 \\]\n"
+            "    * Check case 1: $A$ and $B$\n"
+            "    * Check case 2: $B$ and $A$\n"
+            "</think>\n\n"
+            "Thus, there are 28 different pizzas.\n"
+            "\\boxed{28}"
+        )
+        formatted = format_stream_for_display(raw_stream, is_streaming=False)
+        self.assertNotIn("<think>", formatted)
+        self.assertNotIn("</think>", formatted)
+        self.assertIn("Finished Thinking", formatted)
+        self.assertIn("$$\n\\boxed{28}\n$$", formatted)
+        self.assertNotIn("\n    * Check case 1", formatted)
+        self.assertIn("\n  * Check case 1", formatted)
+
+        partial = format_stream_for_display("We compute $\\frac{8 \\times 7", is_streaming=True)
+        self.assertEqual(partial, "We compute")
+
+    def test_app_replay_recorded_comparison_32k_hero(self) -> None:
+        from app import get_math500_problems, replay_recorded_comparison
+
+        problems = get_math500_problems()
+        hero = next(
+            (p for p in problems if p["unique_id"] == "test/counting_and_probability/389.json"),
+            None,
+        )
+        self.assertIsNotNone(hero)
+        frames = list(
+            replay_recorded_comparison(
+                hero["label"],
+                alpha_left=0.0,
+                alpha_right=1.0,
+                budget_label="32,768 tokens (Paper Protocol — 200 problems)",
+                frame_delay_s=0.0,
+            )
+        )
+        self.assertGreaterEqual(len(frames), 2)
+        prob_md, gold_md, h_l, disp_l, h_r, disp_r = frames[-1]
+        self.assertIn("8 different toppings", prob_md)
+        self.assertIn("\\boxed{28}", gold_md)
+        self.assertIn("RAN OUT OF TOKENS", h_l)
+        self.assertIn("32,768 / 32,768", h_l)
+        self.assertIn("FINISHED CLEANLY", h_r)
+        self.assertIn("3,843 / 32,768", h_r)
+        self.assertNotIn("<think>", disp_l)
+        self.assertNotIn("</think>", disp_l)
+        self.assertNotIn("<think>", disp_r)
+        self.assertNotIn("</think>", disp_r)
+        self.assertNotIn("`\\boxed", disp_r)
+        self.assertIn("$$\n\\boxed{28}\n$$", disp_r)
+
 
 class TestGpuExecutionPath(unittest.TestCase):
     def test_gpu_tag_normalization_and_nan_detector(self) -> None:
