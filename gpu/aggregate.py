@@ -543,14 +543,14 @@ def update_notes_with_gpu_results(
 
     lines.extend(
         [
-            f"- **Budgets & Blend Coefficients**: Budgets `{budgets_executed}` across `alpha` in `{alphas_executed}` (`temperature=0.6`, `top_p=0.95`, `top_k=20`, `presence_penalty=1.5`, `enable_thinking=True`).",
+            f"- **Budgets & Blend Coefficients**: Initial `N=50` GPU cohort (`assets/budget_*/gpu-*`, separate from the `N=50` MPS table in §2 above; see §5 for the `N=200` scaling cohort) across budgets `{budgets_executed}` and `alpha` in `{alphas_executed}` (`temperature=0.6`, `top_p=0.95`, `top_k=20`, `presence_penalty=1.5`, `enable_thinking=True`).",
             "",
             "| Budget | Backend / GPU (`dtype`) | Blend $\\alpha$ | Samples (`N×S`) | Strict Acc % (95% CI) | Forced Acc % (95% CI) | Cap-Hit % (95% CI) | Mean Tokens | 8-Gram Rep % | Speed (`tok/s`) |",
             "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
 
-    for _, r in combined_df.iterrows():
+    for _, r in gpu_rows.iterrows():
         b = int(r["budget"])
         backend_str = f"`{r['backend']}` / `{r['gpu']}` (`{r['dtype']}`)"
         a_str = f"**{r['alpha']:.2f}**"
@@ -582,7 +582,7 @@ def update_notes_with_gpu_results(
     lines.extend(
         [
             "",
-            "- **Published 32k Reference (`RikiyaT/lm_understand-logs` `exp8_math/runs/p50c`)**: Base (`α = 0.0`): **`7.9%`** strict accuracy / **`93.0%`** cut share; Edited `p50c` (`α = 1.0`): **`48.1%`** strict accuracy / **`33.05%`** cut share.",
+            "- **Published 32k Reference (`RikiyaT/lm_understand-logs` `exp8_math/runs/p50c`)**: Same-50 problem `avg@4`: **`7.5%`** Base (`unedited`) vs **`41.0%`** Edited (`p50c`); full-500 benchmark `avg@4`: **`7.9%`** Base / **`93.0%`** cut share vs **`48.1%`** Edited / **`33.05%`** cut share (see §5 for the `N=200` cohort where same-problem `avg@4` is **`9.5%`** vs **`48.0%`**).",
             "- **Visual**: See [`assets/budget_curve_gpu.png`](assets/budget_curve_gpu.png) and per-budget dashboards under `assets/budget_<budget>/gpu-*/sweep_charts.png`.",
             GPU_NOTES_END,
         ]
